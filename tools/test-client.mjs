@@ -1,0 +1,309 @@
+/**
+ * Headless test for the hand-written browser bundle.
+ *
+ * `plugin/lib/client.js` is an artifact, not source that a bundler type-checks,
+ * so this harness stands in for the two things the page provides: the
+ * `window.__ModuleLoader__` registration facade and the platform module table.
+ * It then drives the registered components directly, which is where the real
+ * risks live — slot names, the `hooks` -> `use<Name>` projection, the props the
+ * workspace row passes, and the RPC envelope handling.
+ *
+ * Usage: node tools/test-client.mjs
+ */
+import { strict as assert } from 'node:assert'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { dirname } from 'node:path'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const BUNDLE = join(HERE, '..', 'plugin', 'lib', 'client.js')
+
+/** Captured `load({ id, factory })` call. */
+let registration
+globalThis.window = globalThis.window ?? {}
+globalThis.window.__ModuleLoader__ = {
+  load(value) {
+    registration = value
+  },
+}
+
+/** The page globals the bundle touches: a document and the route fetch. */
+const styleElements = []
+globalThis.document = {
+  baseURI: 'http://127.0.0.1:19387/',
+  querySelectorAll: () => [],
+  createElement: () => ({
+    attrs: {},
+    setAttribute(name, value) {
+      this.attrs[name] = value
+    },
+    set textContent(value) {
+      this.css = value
+    },
+  }),
+  head: {
+    append(element) {
+      styleElements.push(element)
+    },
+  },
+}
+
+/** Recorded route calls and the answer the fake Host returns next. */
+const routeCalls = []
+let routeAnswer = { status: 200, body: { ok: true, value: { sessionId: 'session-archived-1', deleted: true } } }
+globalThis.fetch = async (url, init) => {
+  routeCalls.push({ url: String(url), init })
+  return {
+    status: routeAnswer.status,
+    async text() {
+      return typeof routeAnswer.body === 'string' ? routeAnswer.body : JSON.stringify(routeAnswer.body)
+    },
+  }
+}
+
+/** Minimal element factory standing in for the JSX runtime. */
+const element = (type, props) => ({ type, props: props ?? {} })
+const jsx = (type, props) => element(type, props)
+const jsxs = (type, props) => element(type, props)
+const Fragment = Symbol('Fragment')
+
+/** React stand-in: only the hooks the bundle actually calls. */
+const React = {
+  useState: (initial) => [initial, () => {}],
+  useMemo: (create) => create(),
+  createElement: element,
+}
+
+/** Primitive stand-ins, each identifiable by name so assertions can name them. */
+const primitiveStub = (name) => ({ primitive: name })
+const primitives = new Proxy({}, {
+  get(_target, property) {
+    return primitiveStub(String(property))
+  },
+})
+
+/** Snapshot store stand-in with the observable contract the slot runtime expects. */
+function createSnapshotStore(initial) {
+  let value = initial
+  const listeners = new Set()
+  return {
+    getSnapshot: () => value,
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    set: (next) => {
+      value = next
+      for (const listener of listeners) listener()
+    },
+  }
+}
+
+const MODULES = {
+  react: React,
+  'react/jsx-runtime': { jsx, jsxs, Fragment },
+  '@deepseek-ai/dsh-client-ui-primitives': primitives,
+  '@deepseek-ai/dsh-client-store': { createSnapshotStore },
+}
+
+/** The page's synchronous module table. */
+const require_ = (specifier) => {
+  if (!(specifier in MODULES)) throw new Error(`unexpected module request: ${specifier}`)
+  return MODULES[specifier]
+}
+
+// Importing the bundle executes the registration facade, exactly as a `<script>` load does.
+await import(pathToFileURL(BUNDLE).href)
+assert.ok(registration !== undefined, 'the bundle must register itself with window.__ModuleLoader__')
+assert.equal(registration.id, 'dsh-archive-purge', 'the module id must equal the package name')
+assert.equal(typeof registration.factory, 'function')
+
+const exported = registration.factory(require_)
+assert.equal(exported.name, 'archive-purge')
+assert.deepEqual(exported.inject, ['slots', 'workspaces', 'locale'])
+assert.equal(typeof exported.apply, 'function')
+
+// ---- drive apply() against a fake client Context -------------------------------
+
+const registrations = []
+const injections = []
+/** Locale namespaces the bundle registered, captured for the copy assertions. */
+const dictionaries = new Map()
+/** Live archive set, replaced (never mutated) so the projection sees a new snapshot. */
+let archivedIds = ['session-archived-1']
+const refreshCalls = []
+
+const workspaceModel = {
+  getSnapshot: () => ({ archivedSessionIds: archivedIds }),
+  subscribe: () => () => {},
+}
+
+const ctx = {
+  get(name) {
+    if (name === 'workspaces') return { list: workspaceModel }
+    if (name === 'sessions') return { refresh: () => { refreshCalls.push(true); return Promise.resolve() } }
+    return undefined
+  },
+  effect: (callback) => callback(),
+  locale: {
+    register: (namespace, dicts) => {
+      dictionaries.set(namespace, dicts)
+    },
+  },
+  slots: {
+    inject: (slot, callback) => {
+      injections.push(slot)
+      callback()
+    },
+    register: (options, component) => {
+      registrations.push({ options, component })
+      return () => {}
+    },
+  },
+}
+
+exported.apply(ctx)
+assert.deepEqual(injections, [
+  'sidebar.workspaces.session.menu.item',
+  'sidebar.workspaces.session.row.action',
+  'shell.overlay',
+], 'all three seats must be injected through the reactive inject form')
+
+const byId = new Map(registrations.map((entry) => [`${entry.options.name}#${entry.options.id}`, entry]))
+const menu = byId.get('sidebar.workspaces.session.menu.item#archive-purge.delete')
+const button = byId.get('sidebar.workspaces.session.row.action#archive-purge.delete')
+const dialog = byId.get('shell.overlay#archive-purge.delete-dialog')
+assert.ok(menu && button && dialog, 'the menu row, hover button, and dialog must all register')
+assert.equal(menu.options.order, 500, 'the menu row must follow the shipped archive row at order 400')
+assert.equal(button.options.order, 300, 'the hover button must follow the shipped archive button at order 100')
+assert.equal(menu.options.locale, 'archivePurge')
+assert.equal(button.options.locale, 'archivePurge')
+assert.equal(dialog.options.locale, 'archivePurge')
+
+// ---- the entries only offer themselves on an archived row ----------------------
+
+const t = (key, values) => (values === undefined ? key : `${key}:${JSON.stringify(values)}`)
+/** Point the fake Host projection at a new archive set. */
+const setArchived = (ids) => {
+  archivedIds = ids
+}
+const rowPropsFor = (entry, extra = {}) => {
+  const face = entry.options.inject()
+  return {
+    sessionId: 'session-archived-1',
+    displayTitle: 'Demo session',
+    t,
+    requestDelete: face.requestDelete,
+    // The slot runtime binds every `hooks` source into a `use<Name>` selector hook.
+    useArchived: (selector) => selector(face.hooks.archived.getSnapshot()),
+    useMenuOpenState: () => [false, () => {}],
+    ...extra,
+  }
+}
+
+setArchived(['session-other'])
+assert.equal(menu.component(rowPropsFor(menu)), null, 'no menu row on an unarchived Session')
+assert.equal(button.component(rowPropsFor(button)), null, 'no hover button on an unarchived Session')
+assert.deepEqual([...menu.options.inject().hooks.archived.getSnapshot()], ['session-other'],
+  'the injected hook must track the Host archive set')
+
+setArchived(['session-archived-1'])
+const menuElement = menu.component(rowPropsFor(menu))
+assert.equal(menuElement.type.primitive, 'MenuItemButton')
+assert.equal(menuElement.props.danger, true)
+assert.equal(menuElement.props.separatorBefore, true)
+assert.equal(menuElement.props.children, 'menu.deleteSession')
+
+const buttonElement = button.component(rowPropsFor(button))
+assert.equal(buttonElement.type.primitive, 'Tooltip')
+assert.equal(buttonElement.props.label, 'actions.delete')
+assert.equal(buttonElement.props.children.type, 'button')
+assert.equal(buttonElement.props.children.props.className, 'dsh-ap-icon')
+
+// ---- the dialog opens per request and closes on settle -------------------------
+
+const dialogFace = dialog.options.inject()
+assert.equal(dialog.component({ ...dialogFace, t, useDeleteRequest: (selector) => selector(null) }), null,
+  'nothing renders while no deletion is pending')
+
+const request = { sessionId: 'session-archived-1', displayTitle: 'Demo session', seq: 1 }
+const confirm = dialog.component({ ...dialogFace, t, useDeleteRequest: (selector) => selector(request) })
+assert.equal(confirm.type.name, 'DeleteSessionConfirm')
+
+// ---- the route call and its failure mapping ------------------------------------
+
+await dialogFace.deleteSession('session-archived-1')
+assert.equal(routeCalls.at(-1).url, 'http://127.0.0.1:19387/api/archive-purge/deleteSession',
+  'the route must resolve document-relatively, exactly like the shipped file-upload plugin')
+assert.equal(routeCalls.at(-1).init.method, 'POST')
+assert.equal(routeCalls.at(-1).init.credentials, 'same-origin')
+assert.deepEqual(JSON.parse(routeCalls.at(-1).init.body), { sessionId: 'session-archived-1' })
+assert.equal(refreshCalls.length, 1, 'a successful delete must also pull a fresh Session baseline')
+
+routeAnswer = {
+  status: 200,
+  body: { ok: false, error: { code: 'archive-purge/not-archived', message: 'session x is not archived', details: {} } },
+}
+await assert.rejects(
+  () => dialogFace.deleteSession('session-archived-1'),
+  (error) => error.code === 'archive-purge/not-archived' && error.message === 'session x is not archived',
+  'a Host refusal must carry its code and text',
+)
+assert.equal(refreshCalls.length, 1, 'a refusal must not trigger a refresh')
+
+routeAnswer = { status: 200, body: { ok: true, value: { sessionId: 'session-archived-1', deleted: true } } }
+assert.deepEqual(
+  await dialogFace.deleteSession('session-archived-1'),
+  { sessionId: 'session-archived-1', deleted: true },
+  'the Host result must reach the caller unchanged',
+)
+assert.equal(refreshCalls.length, 2, 'every successful delete pulls a fresh Session baseline')
+
+routeAnswer = { status: 502, body: '<html>bad gateway</html>' }
+await assert.rejects(
+  () => dialogFace.deleteSession('session-archived-1'),
+  /unexpected Host response \(HTTP 502\)/u,
+  'a non-JSON response must be reported as a transport problem',
+)
+
+// ---- refusal copy --------------------------------------------------------------
+
+const zh = dictionaries.get('archivePurge')?.zh
+const en = dictionaries.get('archivePurge')?.en
+assert.ok(zh !== undefined && en !== undefined, 'both dictionaries must be registered')
+for (const key of ['failed.loaded', 'failed.running', 'failed.notArchived', 'failed.subagent', 'failed.guard']) {
+  assert.equal(typeof zh[key], 'string', `zh must define ${key}`)
+  assert.equal(typeof en[key], 'string', `en must define ${key}`)
+}
+
+/** The locale seat backed by the registered dictionaries, for copy assertions. */
+const tZh = (key, values) => {
+  const raw = zh[key] ?? String(key)
+  return values === undefined ? raw : raw.replace(/\{(\w+)\}/gu, (_, name) => String(values[name] ?? ''))
+}
+
+const loaded = Object.assign(new Error('still loaded after 5000ms'), { code: 'archive-purge/session-loaded' })
+assert.match(exported.describeFailure(loaded, tZh), /宿主加载/u, 'a loaded refusal gets its own explanation')
+assert.ok(!exported.describeFailure(loaded, tZh).includes('5000ms'), 'the raw Host detail is not shown for a known code')
+
+const running = Object.assign(new Error('has work in progress'), { code: 'archive-purge/session-running' })
+assert.match(exported.describeFailure(running, tZh), /正在进行/u)
+
+const unknown = Object.assign(new Error('boom'), { code: 'archive-purge/added-later' })
+assert.match(exported.describeFailure(unknown, tZh), /archive-purge\/added-later: boom/u,
+  'an unknown code still surfaces the Host code and text')
+
+const plain = new Error('transport exploded')
+assert.match(exported.describeFailure(plain, tZh), /transport exploded/u)
+
+// ---- triggering the dialog carries the row identity ---------------------------
+
+const requested = []
+const capturingProps = {
+  ...rowPropsFor(menu),
+  requestDelete: (sessionId, displayTitle) => requested.push({ sessionId, displayTitle }),
+}
+menu.component(capturingProps).props.onSelect()
+assert.deepEqual(requested, [{ sessionId: 'session-archived-1', displayTitle: 'Demo session' }])
+
+console.log('client bundle: all assertions passed')

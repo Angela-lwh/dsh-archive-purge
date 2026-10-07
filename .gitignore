@@ -1,0 +1,14 @@
+# Third-party extracts of the shipped DSH packages, produced on demand by tools/asar.mjs.
+# They are ~960 files of someone else's code; regenerate them locally instead of vendoring.
+vendor/
+
+# Install / debug scratch
+node_modules/
+*.log
+cordis.patch.yml.bak-*
+tools/out-*.json
+
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store

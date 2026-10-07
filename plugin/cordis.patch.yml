@@ -1,0 +1,13 @@
+# The dsh-archive-purge bundle patch: one row, applied over whatever layers came
+# before it. Installing this package as a profile bundle inserts the Host half;
+# the browser half needs no row of its own — `dsh-client-modules` finds it through
+# this package's `dsh.client` declaration and `exports["./client"]`.
+#
+# A patch replaces the targeted row's whole `config`, so a profile overriding this
+# row must restate every key it means to keep. `sessionsRoot` is intentionally
+# absent: the Host half reads the live `session-persistence-jsonl` row's own root,
+# which is the only value that stays correct when a deployment relocates storage.
+
+- insert:
+    - id: archive-purge
+      name: dsh-archive-purge
