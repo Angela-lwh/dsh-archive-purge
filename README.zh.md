@@ -33,6 +33,12 @@ DeepSeek Harness 能把会话归档，却从来不能删除会话。本工作区
 它既是授权也是撤销开关），并在下次宿主启动、无人持有时自动完成。弹窗用中英双语明确说明这一点。
 本次启动正是这样把它删掉的。
 
+但延后只是半个答案：所谓「下次启动」等于「为了一个你已经确认过的删除去重启 DSH」。继续实测后
+发现，**卸载入口其实是插件够得着的**：`ctx.sessions` 的 store 条目与 `ctx.agents` 的注册条目各自
+暴露了持有其生命周期边的 `detach` 闭包，两者都调用之后会话确实不再被加载（在运行中的桌面宿主上
+实测 `loaded after both detaches: false`）。所以现在确认删除会**直接释放已归档且空闲的会话并当场删除**；
+延后路径只留给「正在干活」或插件释放不掉的会话。
+
 同一趟绕路还挖出两个较小的事实，两者都已写进插件：桌面宿主**不会**把 `DSH_HOME` 导出给它自己的进程；
 而 `!!js dshHomePath(...)` 的 Loader 行在配置里保留着**未求值的** `{"__jsExpr": …}` 标记 ——
 因此 Harness home 改为从持久化层自己 `locate()` 出来的真实路径反推。
@@ -43,14 +49,46 @@ DeepSeek Harness 能把会话归档，却从来不能删除会话。本工作区
 
 1. 把侧栏视图筛选切到 **仅显示已归档**（或 全部对话）；
 2. 悬停该行点**垃圾桶图标**，或打开它的 `...` 菜单选 **删除会话**；
-3. 在弹窗里确认。宿主已释放的会话会立即消失（宿主推送 `api-session/removed`），日志目录一并删除；
-   宿主仍持有的会话则被**登记**，下次启动自动移除 —— 弹窗会明确这样写。
+3. 在弹窗里确认。**已归档且空闲**的会话会当场删除，即使宿主此刻仍把它持在内存里：插件先释放这份
+   持有（宿主推送 `api-session/removed`），随后移除日志目录。正在干活的会话会被拒绝；插件释放不掉的
+   才会被**登记**、留到下次启动移除 —— 两种情况弹窗都会如实写明。
 
 如果按钮没出现，刷新一次页面（Ctrl+R）。宿主侧不需要重启：该 profile 是热补丁 profile，行已经是 `active`。
 
 已登记的删除记在 `$DSH_HOME/archive-purge/pending.json`，下次启动的延后执行会把它清空。
 在此之前**取消归档即可撤销**一次已登记的删除。想从命令行登记一个会话，用
 `node tools/purge.mjs <sessionId>`；想看当前登记了什么，读那个 JSON 文件。
+
+### 不重启也能完成已登记的删除
+
+正常情况下已经不会再产生登记项，但登记项仍可能存在 —— 来自更早的运行，或来自插件释放不掉的会话。
+它不必再等下次启动：
+
+1. 打开任意会话行的 `...` 菜单，选 **完成待删除清理**；
+2. 弹窗会读取待删除登记，告诉你有多少个会话在等待；
+3. 点 **立即清理**。
+
+此时能释放的条目会**当场释放并删除**；仍释放不掉的会继续留在登记里，弹窗会如实说明。这里不会
+放宽任何可删范围：每个条目都重新走同一条删除路径，重新校验归档标记、运行中的 Agent、目标目录与
+加载状态。同样的这一遍也会在每次宿主启动时自动执行。
+
+### 迭代插件（热部署）
+
+浏览器半包是普通产物、没有构建步骤，而 Loader 行的 revision 取自宿主半包自身的字节，
+所以改完不用重启 app：
+
+| 你改了什么 | 怎么做 | app 会怎样 |
+|---|---|---|
+| `plugin/lib/client.js` | 覆盖到 `$DSH_HOME/plugins/dsh-archive-purge/lib/client.js`（或跑 `install.mjs`），然后刷新一次页面 | 宿主重新快照产物，启动图里该条目的 revision 变化，`/plugins/events` 广播出去，页面随即抓取新的 bundle |
+| `plugin/index.js` | `node install.mjs` | 行 id 与 URL 带上新的内容 revision，宿主导入新的模块代 —— 无需重启 |
+| `plugin/package.json` 的 `dsh.client` | `node install.mjs` | 同 `client.js`；条目列表按声明重建 |
+
+两个坑都值得知道（做这次改动时都踩到了）：
+
+- `install.mjs` 会用 `plugin/` **整体替换** `$DSH_HOME/plugins/dsh-archive-purge`。请改
+  `plugin/` 下的源文件，不要改已装副本 —— 下一次安装会把它覆盖掉。
+- `index.js` **内容没变**时 revision 也不会变，所以重跑 `install.mjs` 对宿主半是空操作。
+  这是预期行为而非故障：改字节才会改 revision。
 
 ## 目录结构
 
@@ -63,6 +101,7 @@ DeepSeek Harness 能把会话归档，却从来不能删除会话。本工作区
 | `tools/test-client.mjs` | 浏览器 bundle 对假的 `__ModuleLoader__`、模块表、React 与 `fetch` |
 | `tools/test-route.mjs` | **正在运行**的宿主端到端：信任栅栏、cookie、路由、JSON 契约 |
 | `tools/e2e-delete.mjs` | 用产品自己的 API 建一个一次性会话并归档，然后探测各条保护 |
+| `tools/e2e-immediate-delete.mjs` | **确认删除的正常路径**：建一个仍被宿主持有的已归档会话，一次调用删掉，并核验响应、磁盘、归档标记、待删除登记与 `session/list` |
 | `tools/e2e-forged-delete.mjs` | **真实破坏性测试**（`--staged` 走延后路径）：制造一个真实存储的会话，交给插件删除，核验磁盘与全部持久状态并清理 |
 | `tools/purge.mjs` | 从命令行调用删除路由 |
 | `tools/remote.mjs` | 从命令行调用任意 Remote namespace/method（用文件传参，避免 PowerShell 引号把 JSON 弄坏） |

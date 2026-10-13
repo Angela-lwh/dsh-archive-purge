@@ -23,9 +23,9 @@ The first click on a real archived Session — its title is withheld here — wa
 - the Session was still **loaded** by the Host (idle, not running) because it had just been
   open — and a loaded Session stays loaded for the Host's whole lifetime. Measured:
   `tools/watch-liveness.mjs` polled for six minutes and the loaded set never changed;
-- it **cannot be unloaded** from a plugin: `ctx.sessions.enter()` throws for an id already in
-  the store, the Client's release never reaches the Host, and the Agent's registration
-  belongs to a Cordis effect inside the `agents` service;
+- it looked like it **cannot be unloaded** from a plugin: `ctx.sessions.enter()` throws for an
+  id already in the store, the Client's release never reaches the Host, and the Agent's
+  registration belongs to a Cordis effect inside the `agents` service;
 - deleting the log anyway was not an option either: `sessionQuery.listSessions()` is the
   union of the in-memory store and the persisted headers, so the row would have come
   back — unopenable.
@@ -34,6 +34,15 @@ So the plugin grew a **deferred mode**: a loaded Session's purge is staged (hist
 untouched; the archive mark kept as both the authorization and the cancel switch) and
 finished automatically at the next Host start, when nothing is loaded. The dialog says so in
 both languages — and that is exactly how the Session above was eventually removed.
+
+Deferred mode turned out to be only half the answer, because "the next start" meant "restart
+DSH for a deletion you already confirmed". The measured runtime shows the release *is*
+reachable from a plugin after all: both `ctx.sessions`' store entry and `ctx.agents`' registry
+entry expose the `detach` closure that owns their lifecycle edge, and calling both leaves the
+Session genuinely unloaded (`loaded after both detaches: false`, measured on the running
+desktop Host). So a confirmed deletion now **releases an archived idle Session and deletes it
+on the spot**; the staged path remains only for Sessions that report work in progress or that
+the plugin could not release.
 
 Two smaller truths came out of the same detour, both now encoded in the plugin: the desktop
 Host does **not** export `DSH_HOME` to its own process, and a `!!js dshHomePath(...)` Loader
@@ -47,9 +56,11 @@ To see the buttons on an archived Session:
 1. switch the sidebar's view filter to **仅显示已归档 / Archived only** (or 全部对话);
 2. hover the archived row and click the **trash icon**, or open its `...` menu and choose
    **删除会话 / Delete session**;
-3. confirm in the dialog. A Session the Host has released disappears immediately (the Host
-   pushes `api-session/removed`) with its log directory; a Session the Host still holds is
-   **staged** and removed automatically at the next start, and the dialog says exactly that.
+3. confirm in the dialog. An **archived, idle** Session is deleted outright, even while the
+   Host is still holding it in memory: the plugin releases that hold first (the Host pushes
+   `api-session/removed`) and then removes the log directory. A Session with work in progress
+   is refused; one the plugin could not release is **staged** and removed at the next start,
+   and the dialog says so in both languages.
 
 If the buttons do not appear, reload the page once (Ctrl+R). The Host half needed no
 restart: the profile is a live-patch profile and the entry is already `active`.
@@ -58,6 +69,40 @@ A staged purge is recorded in `$DSH_HOME/archive-purge/pending.json`, and the de
 at the next start empties that file again. Unarchiving a Session before then cancels its
 staged purge. To stage one from a shell instead, `node tools/purge.mjs <sessionId>`; to see
 what is currently staged, read that JSON file.
+
+### Finishing a staged purge without restarting
+
+Nothing normally stages any more, but a staged entry can still exist — it comes from an older
+run, or from a Session the plugin could not release. It need not wait for the next DSH start:
+
+1. open any Session row's `...` menu and choose **完成待删除清理 / Finish pending deletions**;
+2. the dialog reads the pending store and tells you how many Sessions are waiting;
+3. press **立即清理 / Clean up now**.
+
+Every entry whose Session is now releasable is released and deleted on the spot; one that
+still cannot be released stays staged and the dialog says so. Nothing here widens what may be
+deleted: each entry re-enters the same purge path, which re-checks the archive mark, the
+running Agent, the target directory and the loaded state. The same pass also runs
+automatically at every Host start.
+
+### Iterating on the plugin (hot deploy)
+
+The browser half is a plain artifact — no build step — and the Loader row is revisioned by
+the Host half's own bytes, so an edit is live without restarting the app:
+
+| you changed | do this | what the app does |
+|---|---|---|
+| `plugin/lib/client.js` | copy it over `$DSH_HOME/plugins/dsh-archive-purge/lib/client.js` (or run `install.mjs`), then reload the page once | the Host re-snapshots the artifact, the boot graph's entry revision changes, `/plugins/events` announces it, and the page fetches the new bundle |
+| `plugin/index.js` | `node install.mjs` | the row id and URL carry the new content revision, so the Host imports the new module generation — no restart |
+| `plugin/package.json`'s `dsh.client` | `node install.mjs` | same as `client.js`; the entry list is rebuilt from the declaration |
+
+Two traps worth knowing, both hit while building this change:
+
+- `install.mjs` **replaces** `$DSH_HOME/plugins/dsh-archive-purge` from `plugin/` wholesale.
+  Edit the source under `plugin/`, never the installed copy — the next install overwrites it.
+- An **unchanged** `index.js` keeps its revision, so re-running `install.mjs` is a no-op for
+  the Host half. That is the intended behaviour, not a failure: change the bytes to change
+  the revision.
 
 ## Layout
 
@@ -70,6 +115,7 @@ what is currently staged, read that JSON file.
 | `tools/test-client.mjs` | browser bundle against a fake `__ModuleLoader__`, module table, React, and `fetch` |
 | `tools/test-route.mjs` | the **running** Host end to end: trust fence, cookie, routing, JSON contract |
 | `tools/e2e-delete.mjs` | creates + archives one throwaway Session through the product's own API, then probes the guards |
+| `tools/e2e-immediate-delete.mjs` | **the confirmed-deletion path**: creates + archives a throwaway Session the Host is still holding, deletes it in one call, and audits the reply, the disk, the archive mark, the pending store, and `session/list` |
 | `tools/e2e-forged-delete.mjs` | **the real destructive run** (`--staged` for the deferred path): manufactures a stored Session, hands it to the plugin, audits the disk and every durable store, and cleans up |
 | `tools/purge.mjs` | call the deletion route from a shell |
 | `tools/remote.mjs` | call any Remote namespace/method from a shell (file-based I/O, so PowerShell quoting cannot mangle it) |

@@ -113,17 +113,34 @@ This is the case the button first failed on, and the reason the plugin has a def
 
 A Session the Host has ever loaded stays loaded for the Host's lifetime. Measured on the
 running Host: `tools/watch-liveness.mjs` polled `session/list` every 15 s for six minutes
-and the loaded set never changed. It cannot be unloaded from a plugin either —
-`ctx.sessions.enter()` throws for an id already in the store
-(`if (this.store.has(id)) throw new Error('session "…" already exists')`), the Client's
-release is purely client-side (`manager.drop` never reaches the Host), and the Agent's
-registration is owned by a Cordis effect inside the `agents` service.
+and the loaded set never changed. `ctx.sessions.enter()` also refuses an id already in the
+store (`if (this.store.has(id)) throw new Error('session "…" already exists')`), and the
+Client's release is purely client-side (`manager.drop` never reaches the Host).
 
-Deleting the log underneath such a Session is not an option: `sessionQuery.listSessions()`
-is the union of the in-memory store and the persisted headers, so the row would return on
-the next refresh — unopenable, because its log is gone.
+It is, however, **releasable** — which is what the second version of this plugin is built on.
+The `detach` closure that owns each lifecycle edge lives on the *entry*, not on the service:
+`ctx.sessions.store.get(id).detach()` and `ctx.agents.store.get(id)` followed by
+`ctx.agents.detachEntered(entry)`. Calling both leaves the Session genuinely unloaded
+(`loaded after both detaches: false`, measured on the running desktop Host), and each detach
+emits its paired `session/disposed` / `agent/disposed` edge, so nothing that observes those
+events is bypassed. Reaching the entries rather than calling `detachEntered` directly is
+deliberate for exactly that reason.
 
-So the plugin **stages** it instead:
+So a confirmed deletion now releases an **archived, idle** Session and deletes it on the spot.
+The guards are re-read at release time, not inferred from the caller:
+
+| condition | outcome |
+|---|---|
+| the Agent's `status` is `running` | never released — the turn's own history would be destroyed mid-flight |
+| the workspace registry does not list the Session as archived | never released (a staged purge whose Session was unarchived meanwhile) |
+| `releaseLoaded: false` in config | never released |
+| the Session is released | its log directory is removed in the same request |
+| it still reports loaded after both detaches | the previous staged path, unchanged |
+
+Deleting the log underneath a *still-loaded* Session is still not an option:
+`sessionQuery.listSessions()` is the union of the in-memory store and the persisted headers,
+so the row would return on the next refresh — unopenable, because its log is gone. That is why
+release is attempted first and staging remains as the fallback:
 
 ```
 POST /api/archive-purge/deleteSession  { sessionId }
@@ -140,6 +157,31 @@ POST /api/archive-purge/deleteSession  { sessionId }
 The dialog says exactly this in Chinese and English, so a deferred deletion never looks like
 a silent success. Set `stageWhenLoaded: false` to get the plain
 `archive-purge/session-loaded` refusal instead.
+
+### Finishing a staged purge on demand
+
+Waiting for the next start was the first version's only answer, and it made every
+"the Host still holds it" case cost a restart. The route therefore carries two more verbs,
+and the row menu offers them as **完成待删除清理 / Finish pending deletions**:
+
+```
+POST /api/archive-purge/deleteSession  { action:"listPending" }
+→ { ok:true, value:{ pendingFile:"…/pending.json", sessionIds:[…] } }
+
+POST /api/archive-purge/deleteSession  { action:"retryPending" }
+→ { ok:true, value:{ attempted:2, deleted:1, dropped:0, stillStaged:1,
+                     remaining:[…], stillLoaded:[…], results:[…] } }
+```
+
+`action` defaults to `"delete"`, so the original body shape keeps working. The retry runs
+exactly the pass the next start would run: each entry re-enters the same purge path, so the
+archive mark, the running Agent, the target directory and the loaded state are all re-checked,
+and an entry whose Session is *still* loaded stays staged and is reported as `stillStaged`
+rather than being deleted or silently dropped. Nothing that was previously refused becomes
+deletable — the retry only removes the *restart*.
+
+The one implementation is shared by both callers (`drainStagedPurges`): the startup pass logs
+its report, the retry returns it.
 
 `$DSH_HOME` is deliberately **not** read from the environment to find that file: the desktop
 Host does not export it to its own process, the Loader row keeps an *unevaluated*
@@ -181,7 +223,8 @@ entry's phase.
 | key | default | meaning |
 |---|---|---|
 | `sessionsRoot` | derived from the persistence layer's located paths | session storage root, for the documented-layout fallback |
-| `releaseWaitMs` | `2000` | how long to wait for the Host to release a loaded Session before staging |
+| `releaseWaitMs` | `2000` | how long to wait for the Host to release a loaded Session before releasing it ourselves |
+| `releaseLoaded` | `true` | release an archived idle Session so the deletion completes now, instead of staging it |
 | `stageWhenLoaded` | `true` | stage a loaded Session's purge for the next start instead of refusing |
 | `pendingFile` | `$DSH_HOME/archive-purge/pending.json` | where staged purges wait |
 
@@ -190,16 +233,20 @@ entry's phase.
   name: 'file:///…/dsh-archive-purge/index.js?rev=<revision>'
   config:
     releaseWaitMs: 5000
+    releaseLoaded: false
     stageWhenLoaded: false
 ```
+
+Set `releaseLoaded: false` to keep the Host's hold untouched — the behaviour of the first
+version, where every loaded Session is staged (or refused, with `stageWhenLoaded: false`).
 
 Note that a patch row replaces the targeted row's whole `config`.
 
 ## Limits
 
-- **A loaded Session is purged at the next start, not immediately.** The Host cannot be made
-  to release it, so the alternative would be a row that returns, unopenable. Unarchiving
-  cancels the staged purge.
+- **A loaded Session is released and purged immediately when it is archived and idle.** One
+  that is not released — work in progress, or a release that did not take — stays staged for
+  the next start, or can be retried from the pending dialog. Unarchiving cancels a staged entry.
 - **A Session with running work cannot be deleted at all**, by any path; stop the work first.
 - **`projectKey` is lossy and truncating by design** (it collapses `/ \ :` runs and caps the
   component at 251 characters). The fallback derivation mirrors it, is covered by

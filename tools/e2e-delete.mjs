@@ -108,10 +108,30 @@ if (firstProbe.body?.ok === true) {
   const ids = (listed.value?.items ?? []).map((item) => item.sessionId)
   check('session/list no longer reports it', !ids.includes(sessionId), `${String(ids.length)} sessions listed`)
 } else {
+  // The loaded case ends in one of two correct refusals. The happy path — the
+  // plugin releases an archived idle Session and deletes it outright — is covered
+  // end to end by `e2e-immediate-delete.mjs`; what is asserted here is that when
+  // the plugin does *not* delete, it says so and stages or refuses instead of
+  // pretending. `session-live` never appears: that code means work in progress,
+  // which this Session never has.
   const code = firstProbe.body?.error?.code
-  check('a live Session is refused, not deleted', code === 'archive-purge/session-live', String(code))
+  const deferred = code === 'archive-purge/session-deferred'
+  check('a Session the Host would not release is staged or refused, never deleted',
+    deferred || code === 'archive-purge/session-loaded', String(code))
   check('the log directory is untouched', existsSync(directory))
   check('it stays archived (hidden by the default filter)', readWorkspaceStore().archivedSessionIds.includes(sessionId))
+  if (deferred) {
+    check('the staged purge names it in the pending store', readPending().includes(sessionId),
+      `pending=${JSON.stringify(readPending())}`)
+    // The retry that replaces a Host restart is honest about a Session it still
+    // cannot release: the entry stays staged instead of being deleted or dropped.
+    const retried = await probeDelete(sessionId, { action: 'retryPending' })
+    const report = retried.body?.value
+    check('the on-demand pass reports the Session as still staged',
+      retried.body?.ok === true && report?.deleted === 0 && report?.remaining?.includes(sessionId),
+      JSON.stringify(report ?? retried.body).slice(0, 200))
+    check('the retry left the store untouched', readPending().includes(sessionId))
+  }
 }
 
 // ---- 4. a protective refusal on REAL pre-existing data, fully reversible -------
@@ -136,9 +156,13 @@ const finalStore = readWorkspaceStore()
 const beforeIds = new Set(Object.keys(before.workspaces))
 const afterIds = new Set(Object.keys(finalStore.workspaces))
 check('no Workspace registration was added or removed', beforeIds.size === afterIds.size, `${String(beforeIds.size)} -> ${String(afterIds.size)}`)
+// This run adds at most one archived id of its own, and removes it only when the
+// Host had already released it. Everything that was archived before is still
+// archived: nothing here touches a Session it did not create.
+const added = finalStore.archivedSessionIds.filter((id) => !before.archivedSessionIds.includes(id))
 check('the archived set is back to what this run did not touch',
-  finalStore.archivedSessionIds.length === (deleted ? 0 : 1),
-  `before=${String(before.archivedSessionIds.length)} after=${String(finalStore.archivedSessionIds.length)}`)
+  before.archivedSessionIds.every((id) => finalStore.archivedSessionIds.includes(id)) && added.length <= 1,
+  `before=${String(before.archivedSessionIds.length)} after=${String(finalStore.archivedSessionIds.length)} added=${JSON.stringify(added)}`)
 
 finish()
 
@@ -146,8 +170,9 @@ finish()
 function finish() {
   console.log(`\n${failures === 0 ? 'e2e: all checks passed' : `e2e: ${String(failures)} check(s) failed`}`)
   if (!deletedNow()) {
-    console.log('\nnote: the throwaway Session above is archived and still on disk.')
-    console.log('      after the next Host restart it is cold, so the sidebar button will delete it.')
+    console.log('\nnote: the throwaway Session above is archived, staged, and still on disk.')
+    console.log('      it is removed by the next Host start, or on demand from the row menu')
+    console.log('      ("Finish pending deletions") once the Host has released that Session.')
   }
   process.exitCode = failures === 0 ? 0 : 1
   process.exit()
@@ -215,8 +240,25 @@ function encodeSegment(raw) {
 }
 
 /** Call the plugin's own route. */
-function probeDelete(sessionId) {
-  return sendJson(DELETE_ROUTE, { sessionId })
+/**
+ * One call on the plugin's route. The body is the caller's, so the same helper
+ * drives `delete` (the default verb) and the `retryPending` pass.
+ * @param sessionId - target Session, or undefined for a verb that takes none.
+ * @param extra - additional body fields, such as `action`.
+ * @returns the parsed response.
+ */
+function probeDelete(sessionId, extra = {}) {
+  return sendJson(DELETE_ROUTE, { ...(sessionId === undefined ? {} : { sessionId }), ...extra })
+}
+
+/** The Session ids the plugin has staged for a purge it could not complete. */
+function readPending() {
+  try {
+    const parsed = JSON.parse(readFileSync(join(home, 'archive-purge', 'pending.json'), 'utf8'))
+    return Array.isArray(parsed?.sessionIds) ? parsed.sessionIds : []
+  } catch {
+    return []
+  }
 }
 
 /** One Remote call: `POST /api/<namespace>/<method>` with `{args:{<param>:value}}`. */

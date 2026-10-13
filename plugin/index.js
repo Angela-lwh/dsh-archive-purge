@@ -48,7 +48,7 @@ export const name = 'archive-purge'
  * and these four carry the arithmetic that silently misbehaves (a wrong home reads an
  * empty store and the deferred purge looks idle).
  */
-export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending }
+export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession }
 /**
  * Hard service requirements. An array (not the older `{required, optional}`
  * object shape, which the vendored Cordis reads as services literally named
@@ -63,6 +63,19 @@ export const inject = ['connection', 'workspaceRegistry', 'sessionPersistence']
  * interceptor, so it cannot collide with a generated endpoint.
  */
 const ROUTE_PATH = '/api/archive-purge/deleteSession'
+/**
+ * Request verbs of the one route, carried in the body's `action` field.
+ *
+ * `delete` stays the default so an older browser half — or any caller written
+ * against the first version — keeps working unchanged. `listPending` and
+ * `retryPending` serve the retry seat: a staged purge used to be completable only
+ * by restarting the Host, and both actions together replace that restart with one
+ * request (`listPending` says whether anything is staged, `retryPending` runs the
+ * stored pass immediately).
+ */
+const ACTION_DELETE = 'delete'
+const ACTION_LIST_PENDING = 'listPending'
+const ACTION_RETRY_PENDING = 'retryPending'
 /** One log generation, or a migration staging file, inside a session directory. */
 const SESSION_DIR_CONTENT = /^(?:session(?:\.[A-Za-z0-9]+)*\.jsonl(?:\.zstd)?|session\.migration\..*\.tmp)$/
 /** Project directory keys are `--<slug>--`; the no-project fallback is `_no-cwd`. */
@@ -77,18 +90,17 @@ const PROJECT_DIR_KEY = /^--.*--$/
  * lists live Sessions independently of their stored artifacts —
  * `sessionQuery.listSessions()` is the union of the in-memory store and the
  * persisted headers — so removing the log underneath a loaded Session would leave a
- * row that returns on the next refresh and can no longer be opened. No
- * plugin-reachable API unloads one (`ctx.sessions.enter()` throws for an id already
- * in the store, and the Client's release never reaches the Host), so the deletion is
- * refused until the Host restart that releases it.
+ * row that returns on the next refresh and can no longer be opened. Such a Session
+ * is therefore released first (see {@link releaseLoadedSession}); `session-loaded`
+ * is what is left when the caller disables that and the Session is still held.
  */
 const CODE_RUNNING = 'archive-purge/session-running'
 const CODE_LOADED = 'archive-purge/session-loaded'
 /**
  * The loaded Session has been *staged* instead: its purge is recorded and finishes
- * at the next Host start, when nothing is loaded any more. This is the answer to the
- * one case a plugin cannot complete immediately — the Host holds the Session for its
- * whole lifetime, and no API releases it — without ever lying about what happened.
+ * at the next Host start, when nothing is loaded any more. This is the fallback for
+ * the one case the release step cannot cover — work in progress, or a Session that
+ * still reports loaded after both detaches — without ever lying about what happened.
  */
 const CODE_DEFERRED = 'archive-purge/session-deferred'
 /** Default budget for waiting out a Host release before refusing or staging, in milliseconds. */
@@ -123,6 +135,7 @@ export function apply(ctx, config = {}) {
     releaseWaitMs: readWaitBudget(config?.releaseWaitMs),
     pendingFile: readOptionalPath(config?.pendingFile),
     stageWhenLoaded: config?.stageWhenLoaded !== false,
+    releaseLoaded: config?.releaseLoaded !== false,
   }
   ctx.connection.fetch.register({
     path: ROUTE_PATH,
@@ -134,11 +147,13 @@ export function apply(ctx, config = {}) {
 }
 
 /**
- * Answer one authenticated deletion request.
+ * Answer one authenticated request on the plugin's route.
  *
  * Every refusal travels as a JSON envelope rather than an HTTP status, because
  * the browser half distinguishes a Host *decision* (not archived, session still
- * live) from a transport failure, and the dialog shows the former verbatim.
+ * live) from a transport failure, and the dialog shows the former verbatim. The
+ * same rule covers a retry: a Session that is still loaded is an outcome, not an
+ * error.
  *
  * @param ctx - Host context.
  * @param settings - resolved plugin config.
@@ -154,6 +169,27 @@ async function handleDeleteRequest(ctx, settings, request) {
     body = await request.json()
   } catch {
     return jsonResponse(400, failure('archive-purge/bad-request', 'request body must be JSON'))
+  }
+  const action = readAction(body)
+  if (action === undefined) {
+    return jsonResponse(400, failure('archive-purge/bad-request', 'action must be a string'))
+  }
+  if (action === ACTION_LIST_PENDING) {
+    try {
+      return jsonResponse(200, { ok: true, value: await listPendingPurge(ctx, settings) })
+    } catch (error) {
+      return jsonResponse(200, failure(error?.code ?? 'archive-purge/failed', messageOf(error)))
+    }
+  }
+  if (action === ACTION_RETRY_PENDING) {
+    try {
+      return jsonResponse(200, { ok: true, value: await retryPendingPurge(ctx, settings, request.signal) })
+    } catch (error) {
+      return jsonResponse(200, failure(error?.code ?? 'archive-purge/failed', messageOf(error)))
+    }
+  }
+  if (action !== ACTION_DELETE) {
+    return jsonResponse(400, failure('archive-purge/bad-request', `unknown action "${action}"`))
   }
   const sessionId = readSessionId(body)
   if (sessionId === undefined) {
@@ -225,6 +261,18 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
 
   await waitForRelease(sessions, agents, sessionId, settings.releaseWaitMs, signal)
   if (isLoaded(sessions, agents, sessionId)) {
+    // The Host holds nothing else that can free this Session, so release it here
+    // rather than making the user restart DSH for a deletion they already
+    // confirmed. Only an archived, idle Session is eligible; anything else keeps
+    // the previous refusal-or-stage behaviour.
+    const released = await releaseLoadedSession(ctx, sessions, agents, sessionId, settings)
+    if (released.released) {
+      ctx.logger?.info?.(`archive-purge: released the Host's hold on ${sessionId} to finish its deletion`)
+    } else {
+      ctx.logger?.info?.(`archive-purge: kept ${sessionId} loaded (${released.reason}); its purge is staged`)
+    }
+  }
+  if (isLoaded(sessions, agents, sessionId)) {
     if (!settings.stageWhenLoaded) {
       throw new PurgeError(CODE_LOADED, `session ${sessionId} is still loaded by the Host`)
     }
@@ -241,6 +289,47 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
   // drops the row through `handleSessionRemoved` without a reload or restart.
   ctx.emit('api-session/removed', sessionId)
   return { sessionId, deleted: true, directory }
+}
+
+/**
+ * Release the Host's own hold on an archived, idle Session — the step that lets a
+ * confirmed deletion finish now instead of at the next start.
+ *
+ * Both halves of "loaded" are separate registries with separate lifecycles, and
+ * both must go: `ctx.sessions`' store entry owns the log handle and emits
+ * `session/disposed`, and `ctx.agents`' registry entry owns the Agent and emits
+ * `agent/disposed`. The detach closures live on those entries (measured against
+ * the running Host), not on the services, so this reaches the entries rather than
+ * calling `detachEntered` directly — that would remove the entry without emitting
+ * the paired disposal edge.
+ *
+ * The authorization is the archive mark, re-read here rather than inferred from
+ * the caller: an archived Session has already been asked to leave the browsing
+ * surface, so releasing it destroys nothing the user can still see. A Session with
+ * work in progress is never eligible, and neither is one the workspace registry
+ * does not list as archived (a staged purge whose Session was unarchived in the
+ * meantime).
+ *
+ * @param ctx - Host context.
+ * @param sessions - `ctx.sessions`, when present.
+ * @param agents - `ctx.agents`, when present.
+ * @param sessionId - target Session id.
+ * @param settings - resolved plugin config.
+ * @returns whether it was released, and why not when it was not.
+ */
+async function releaseLoadedSession(ctx, sessions, agents, sessionId, settings) {
+  if (settings.releaseLoaded !== true) return { released: false, reason: 'disabled by configuration' }
+  if (agents?.get?.(sessionId)?.status === 'running') return { released: false, reason: 'work in progress' }
+  if (!readArchivedIds(ctx.workspaceRegistry).includes(sessionId)) {
+    return { released: false, reason: 'not archived' }
+  }
+  const entry = sessions?.store?.get?.(sessionId)
+  if (entry !== undefined && typeof entry.detach === 'function') entry.detach()
+  const agentEntry = agents?.store?.get?.(sessionId)
+  if (agentEntry !== undefined && typeof agents?.detachEntered === 'function') agents.detachEntered(agentEntry)
+  return isLoaded(sessions, agents, sessionId)
+    ? { released: false, reason: 'the Host still reports it loaded' }
+    : { released: true }
 }
 
 /**
@@ -355,41 +444,118 @@ async function stageStagedPurge(ctx, settings, sessionId, directory) {
  * @param settings - resolved plugin config.
  */
 function scheduleStagedPurges(ctx, settings) {
-  const drain = async () => {
-    const path = await pendingFilePath(ctx, settings, undefined)
-    if (path === undefined) return
-    const staged = readPending(path)
-    if (staged.length === 0) return
-    const remaining = []
-    for (const sessionId of staged) {
-      try {
-        const value = await purgeArchivedSession(ctx, settings, sessionId, undefined)
-        ctx.logger?.info?.(
-          `archive-purge: staged purge of ${sessionId}: ${value.deleted ? 'log removed' : `nothing to remove (${String(value.reason)})`}`,
-        )
-      } catch (error) {
-        const code = error?.code
-        if (PERMANENT_REFUSALS.has(code)) {
-          // The user's own decision (unarchived meanwhile) or a hard limit (subagent
-          // history, a failed target check): drop the entry instead of retrying it on
-          // every start forever.
-          ctx.logger?.warn?.(`archive-purge: staged purge of ${sessionId} dropped (${String(code)}): ${messageOf(error)}`)
+  Promise.resolve()
+    .then(async () => {
+      const report = await drainStagedPurges(ctx, settings, undefined)
+      for (const entry of report.results) {
+        if (entry.outcome === 'deleted') {
+          ctx.logger?.info?.(`archive-purge: staged purge of ${entry.sessionId}: log removed`)
+        } else if (entry.outcome === 'nothing-to-remove') {
+          ctx.logger?.info?.(`archive-purge: staged purge of ${entry.sessionId}: nothing to remove (${String(entry.reason)})`)
+        } else if (entry.outcome === 'dropped') {
+          ctx.logger?.warn?.(`archive-purge: staged purge of ${entry.sessionId} dropped (${String(entry.code)}): ${String(entry.message)}`)
         } else {
-          // Still loaded, or a transient failure: keep it staged for the next start.
-          remaining.push(sessionId)
-          ctx.logger?.warn?.(`archive-purge: staged purge of ${sessionId} could not run (${String(code)}); keeping it staged`)
+          ctx.logger?.warn?.(`archive-purge: staged purge of ${entry.sessionId} could not run (${String(entry.code)}); keeping it staged`)
         }
       }
-    }
+    })
+    .catch((error) => {
+      ctx.logger?.warn?.(`archive-purge: staged purge pass failed: ${messageOf(error)}`)
+    })
+}
+
+/**
+ * Run one pass over the deferred-purge store and publish what is left.
+ *
+ * Extracted so the startup pass and the on-demand retry share exactly one
+ * implementation: they differ only in whether a report is returned to a caller or
+ * written to the Host log. An entry is dropped when its refusal can never become a
+ * purge (the user unarchived it, or the target is not deletable at all), and kept
+ * otherwise — including for a failure this plugin does not understand, because
+ * losing a deferred purge is worse than retrying it.
+ *
+ * The store is rewritten even when the pass changed nothing, so a retry that finds
+ * every Session still loaded leaves an identical file rather than a stale one.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param signal - caller cancellation for an on-demand retry.
+ * @returns counts plus one entry per attempted Session.
+ */
+async function drainStagedPurges(ctx, settings, signal) {
+  const path = await pendingFilePath(ctx, settings, undefined)
+  if (path === undefined) {
+    throw new PurgeError('archive-purge/no-pending-store', 'no Harness home could be resolved, so there is no deferred-purge store to read')
+  }
+  const staged = readPending(path)
+  const results = []
+  const remaining = []
+  for (const sessionId of staged) {
     try {
-      writePending(path, remaining)
+      const value = await purgeArchivedSession(ctx, settings, sessionId, signal)
+      results.push(
+        value.deleted
+          ? { sessionId, outcome: 'deleted', directory: value.directory }
+          : { sessionId, outcome: 'nothing-to-remove', reason: value.reason },
+      )
     } catch (error) {
-      ctx.logger?.warn?.(`archive-purge: could not update ${path}: ${messageOf(error)}`)
+      const code = error?.code
+      if (PERMANENT_REFUSALS.has(code)) {
+        results.push({ sessionId, outcome: 'dropped', code, message: messageOf(error) })
+      } else {
+        remaining.push(sessionId)
+        results.push({ sessionId, outcome: 'still-staged', code, message: messageOf(error) })
+      }
     }
   }
-  Promise.resolve().then(drain).catch((error) => {
-    ctx.logger?.warn?.(`archive-purge: staged purge pass failed: ${messageOf(error)}`)
-  })
+  writePending(path, remaining)
+  return {
+    pendingFile: path,
+    attempted: results.length,
+    deleted: results.filter((entry) => entry.outcome === 'deleted').length,
+    dropped: results.filter((entry) => entry.outcome === 'dropped').length,
+    stillStaged: remaining.length,
+    remaining,
+    results,
+  }
+}
+
+/**
+ * What is staged right now, without touching it.
+ *
+ * The browser half asks before it offers the retry, and again after running one, so
+ * the pending set is read in exactly one place.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @returns the pending store's path and its Session ids.
+ */
+async function listPendingPurge(ctx, settings) {
+  const path = await pendingFilePath(ctx, settings, undefined)
+  if (path === undefined) {
+    throw new PurgeError('archive-purge/no-pending-store', 'no Harness home could be resolved, so there is no deferred-purge store to read')
+  }
+  return { pendingFile: path, sessionIds: readPending(path) }
+}
+
+/**
+ * Run the stored pass now — the answer to "must I restart DSH to finish this?".
+ *
+ * A Session the Host has since released is purged on the spot; one it still holds
+ * stays staged and is reported as such. Nothing here widens what may be deleted:
+ * every entry re-enters {@link purgeArchivedSession}, which re-checks the archive
+ * mark, the running Agent, the target directory and the loaded state.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param signal - caller cancellation.
+ * @returns the pass report plus the ids that are still loaded.
+ */
+async function retryPendingPurge(ctx, settings, signal) {
+  const report = await drainStagedPurges(ctx, settings, signal)
+  const sessions = ctx.get('sessions')
+  const agents = ctx.get('agents')
+  return { ...report, stillLoaded: report.remaining.filter((sessionId) => isLoaded(sessions, agents, sessionId)) }
 }
 
 /**
@@ -703,6 +869,22 @@ function readOptionalPath(value) {
 /** A non-negative wait budget in milliseconds, or the default. */
 function readWaitBudget(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : DEFAULT_RELEASE_WAIT_MS
+}
+
+/**
+ * The requested verb, defaulting to `delete`.
+ *
+ * A body without `action` is the first version's request shape and keeps working;
+ * an `action` of the wrong type is malformed rather than defaulted, because a typo
+ * in a verb must not silently become a deletion.
+ *
+ * @param payload - the parsed request body.
+ * @returns the verb, or undefined when `action` is present but not a string.
+ */
+function readAction(payload) {
+  const value = payload?.action
+  if (value === undefined || value === null) return ACTION_DELETE
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
 }
 
 /** The requested Session id, or undefined when the payload is malformed. */

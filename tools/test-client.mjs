@@ -71,6 +71,12 @@ const Fragment = Symbol('Fragment')
 const React = {
   useState: (initial) => [initial, () => {}],
   useMemo: (create) => create(),
+  // The retry dialog reads the pending store from an effect, so the stub runs one
+  // pass and its cleanup immediately — the same synchronous shape as the others.
+  useEffect: (effect) => {
+    const cleanup = effect()
+    if (typeof cleanup === 'function') cleanup()
+  },
   createElement: element,
 }
 
@@ -166,19 +172,27 @@ exported.apply(ctx)
 assert.deepEqual(injections, [
   'sidebar.workspaces.session.menu.item',
   'sidebar.workspaces.session.row.action',
+  'sidebar.workspaces.session.menu.item',
   'shell.overlay',
-], 'all three seats must be injected through the reactive inject form')
+  'shell.overlay',
+], 'all five seats must be injected through the reactive inject form')
 
 const byId = new Map(registrations.map((entry) => [`${entry.options.name}#${entry.options.id}`, entry]))
 const menu = byId.get('sidebar.workspaces.session.menu.item#archive-purge.delete')
 const button = byId.get('sidebar.workspaces.session.row.action#archive-purge.delete')
 const dialog = byId.get('shell.overlay#archive-purge.delete-dialog')
+const retryMenu = byId.get('sidebar.workspaces.session.menu.item#archive-purge.retry-pending')
+const pendingDialog = byId.get('shell.overlay#archive-purge.pending-dialog')
 assert.ok(menu && button && dialog, 'the menu row, hover button, and dialog must all register')
+assert.ok(retryMenu && pendingDialog, 'the retry menu row and its dialog must register too')
 assert.equal(menu.options.order, 500, 'the menu row must follow the shipped archive row at order 400')
 assert.equal(button.options.order, 300, 'the hover button must follow the shipped archive button at order 100')
+assert.equal(retryMenu.options.order, 600, 'the retry row must follow the delete row in the same menu')
 assert.equal(menu.options.locale, 'archivePurge')
 assert.equal(button.options.locale, 'archivePurge')
 assert.equal(dialog.options.locale, 'archivePurge')
+assert.equal(retryMenu.options.locale, 'archivePurge')
+assert.equal(pendingDialog.options.locale, 'archivePurge')
 
 // ---- the entries only offer themselves on an archived row ----------------------
 
@@ -237,7 +251,8 @@ assert.equal(routeCalls.at(-1).url, 'http://127.0.0.1:19387/api/archive-purge/de
   'the route must resolve document-relatively, exactly like the shipped file-upload plugin')
 assert.equal(routeCalls.at(-1).init.method, 'POST')
 assert.equal(routeCalls.at(-1).init.credentials, 'same-origin')
-assert.deepEqual(JSON.parse(routeCalls.at(-1).init.body), { sessionId: 'session-archived-1' })
+assert.deepEqual(JSON.parse(routeCalls.at(-1).init.body), { action: 'delete', sessionId: 'session-archived-1' },
+  'the browser half names its verb; the Host defaults a body without one for older clients')
 assert.equal(refreshCalls.length, 1, 'a successful delete must also pull a fresh Session baseline')
 
 routeAnswer = {
@@ -305,5 +320,63 @@ const capturingProps = {
 }
 menu.component(capturingProps).props.onSelect()
 assert.deepEqual(requested, [{ sessionId: 'session-archived-1', displayTitle: 'Demo session' }])
+
+// ---- the retry seat: pending list, pass, and the menu row that opens it --------
+
+/** Menu closes recorded by the retry row's own select handler. */
+const menuClosed = []
+const retryFace = retryMenu.options.inject()
+assert.deepEqual(Object.keys(retryFace.hooks), ['retryRequest'],
+  'the retry row is driven by its own request store, not the deletion one')
+assert.equal(typeof retryFace.listPending, 'function')
+assert.equal(typeof retryFace.retryPending, 'function')
+
+assert.deepEqual(retryFace.hooks.retryRequest.getSnapshot(), null,
+  'nothing is requested until the row is used')
+
+const retriesRequested = []
+retryMenu.component({
+  t,
+  useMenuOpenState: () => [false, () => { menuClosed.push(true) }],
+  requestRetry: () => retriesRequested.push(true),
+}).props.onSelect()
+assert.equal(menuClosed.length, 1, 'using the row must close the menu first')
+assert.equal(retriesRequested.length, 1, 'using the row must raise the retry dialog')
+
+routeAnswer = { status: 200, body: { ok: true, value: { pendingFile: '/tmp/pending.json', sessionIds: ['session-a', 'session-b'] } } }
+assert.deepEqual(await retryFace.listPending(), { pendingFile: '/tmp/pending.json', sessionIds: ['session-a', 'session-b'] })
+assert.deepEqual(JSON.parse(routeCalls.at(-1).init.body), { action: 'listPending' },
+  'the pending read must name its verb, so the Host never mistakes it for a delete')
+
+const report = { attempted: 2, deleted: 1, dropped: 0, stillStaged: 1, remaining: ['session-b'], stillLoaded: ['session-b'], results: [] }
+routeAnswer = { status: 200, body: { ok: true, value: report } }
+assert.deepEqual(await retryFace.retryPending(), report, 'the pass report must reach the caller unchanged')
+assert.deepEqual(JSON.parse(routeCalls.at(-1).init.body), { action: 'retryPending' },
+  'the cleanup pass must name its verb')
+
+const pendingFace = pendingDialog.options.inject()
+assert.equal(
+  pendingDialog.component({ ...pendingFace, t, useRetryRequest: (selector) => selector(null) }),
+  null,
+  'the retry dialog renders nothing while no retry is pending',
+)
+const pendingElement = pendingDialog.component({
+  ...pendingFace,
+  t,
+  useRetryRequest: (selector) => selector({ seq: 1 }),
+})
+assert.equal(pendingElement.type.name, 'PendingPurgeConfirm',
+  'a raised retry must render the confirm face, with the same props shape as the delete dialog')
+assert.equal(pendingElement.props.request.seq, 1)
+assert.equal(pendingElement.props.t, t)
+
+// The pending screen's own copy, and the code a missing store reports.
+for (const key of ['pending.title', 'pending.lead', 'pending.count', 'pending.none', 'pending.retry', 'pending.still', 'menu.retryPending']) {
+  assert.equal(typeof zh[key], 'string', `zh must define ${key}`)
+  assert.equal(typeof en[key], 'string', `en must define ${key}`)
+}
+const noStore = Object.assign(new Error('no home'), { code: 'archive-purge/no-pending-store' })
+assert.equal(exported.describeFailure(noStore, tZh), zh['pending.noStore'],
+  'a missing pending store gets its own explanation rather than a raw code')
 
 console.log('client bundle: all assertions passed')

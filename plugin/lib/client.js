@@ -42,9 +42,15 @@ window.__ModuleLoader__.load({
 		 * shell (`<base href="./">`), matching `dsh-client-file-upload`.
 		 */
 		const ROUTE_PATH = '/api/archive-purge/deleteSession'
+		/** Route verbs, mirroring the Host half's own action constants. */
+		const ACTION_DELETE = 'delete'
+		const ACTION_LIST_PENDING = 'listPending'
+		const ACTION_RETRY_PENDING = 'retryPending'
 		/** Both rows sit after the shipped archive action (menu 400 / hover 100). */
 		const MENU_ORDER = 500
 		const BUTTON_ORDER = 300
+		/** The retry row follows the delete row in the same menu. */
+		const RETRY_MENU_ORDER = 600
 		const STYLE_MARKER = 'data-dsh-archive-purge'
 
 		/**
@@ -69,6 +75,21 @@ window.__ModuleLoader__.load({
 			'failed.notArchived': 'Only an archived session can be deleted. Archive it first.',
 			'failed.subagent': 'This session was produced by a subagent and cannot be deleted.',
 			'failed.guard': 'Refused for safety: the session directory did not pass its checks. Nothing was deleted.',
+			'menu.retryPending': 'Finish pending deletions',
+			'pending.title': 'Pending deletions',
+			'pending.lead':
+				'Sessions whose log could not be removed because the Host was still holding them. Unarchiving a session cancels its pending removal.',
+			'pending.noStore': 'No Harness home could be resolved, so there is no deferred-purge store on this machine.',
+			'pending.count': '{count} session(s) are waiting to be removed from disk.',
+			'pending.none': 'Nothing is pending: every scheduled deletion has already completed.',
+			'pending.loading': 'Reading the pending list\u2026',
+			'pending.retry': 'Clean up now',
+			'pending.running': 'Cleaning up\u2026',
+			'pending.still':
+				'{count} session(s) are still held in memory by the Host. Its history is untouched; this window can delete them the moment the Host releases them, so try again later \u2014 a restart is no longer required.',
+			'pending.done': 'Removed {count} session(s) from disk.',
+			'pending.drop': 'Dropped {count} entry that can no longer be purged (unarchived, or not deletable).',
+			'pending.fail': 'Failed: {message}',
 		}
 		const zh = {
 			'menu.deleteSession': '删除会话',
@@ -87,6 +108,20 @@ window.__ModuleLoader__.load({
 			'failed.notArchived': '只有已归档的会话才能删除，请先归档。',
 			'failed.subagent': '这是子代理产生的会话，不支持删除。',
 			'failed.guard': '为安全起见已拒绝：会话目录未通过校验，未删除任何内容。',
+			'menu.retryPending': '完成待删除清理',
+			'pending.title': '待删除的清理',
+			'pending.lead': '这些会话的日志因为仍被宿主占用而没能删除。取消归档即可撤销对应的待删除登记。',
+			'pending.noStore': '无法确定 Harness 主目录，这台机器上不存在待删除登记文件。',
+			'pending.count': '有 {count} 个会话等待从磁盘移除。',
+			'pending.none': '当前没有待删除项：已登记的清理都已完成。',
+			'pending.loading': '正在读取待删除列表\u2026',
+			'pending.retry': '立即清理',
+			'pending.running': '正在清理\u2026',
+			'pending.still':
+				'还有 {count} 个会话被宿主占用在内存中。它们的历史没有被改动；宿主一旦释放，在这里就能直接删除，稍后重试即可，不必再重启 DSH。',
+			'pending.done': '已从磁盘移除 {count} 个会话。',
+			'pending.drop': '已丢弃 {count} 条无法继续清理的登记（已取消归档，或本身不可删除）。',
+			'pending.fail': '失败：{message}',
 		}
 
 		/**
@@ -103,6 +138,7 @@ window.__ModuleLoader__.load({
 			'archive-purge/target-mismatch': 'failed.guard',
 			'archive-purge/target-not-a-session': 'failed.guard',
 			'archive-purge/not-found': 'failed.guard',
+			'archive-purge/no-pending-store': 'pending.noStore',
 		}
 
 		// The row's hover strip styles its own 16px icon buttons from a private CSS
@@ -196,6 +232,122 @@ window.__ModuleLoader__.load({
 					},
 					children: jsx(primitives.IconTrashOutlineRegular, { size: 14 }),
 				}),
+			})
+		}
+
+		/**
+		 * Menu row for the deferred purges: the seat that replaces a Host restart.
+		 *
+		 * It is deliberately not destructive and needs no archived Session of its own —
+		 * the pending set is global, and unarchiving a Session is what cancels its
+		 * entry. It sits in the row menu so it is reachable from the same place the row
+		 * actions are.
+		 */
+		function RetryPendingMenuItem({ useMenuOpenState, requestRetry, t }) {
+			const [, setMenuOpen] = useMenuOpenState()
+			return jsx(primitives.MenuItemButton, {
+				separatorBefore: true,
+				icon: jsx(primitives.IconRefreshOutlineRegular, { size: 14 }),
+				onSelect: () => {
+					setMenuOpen(false)
+					requestRetry()
+				},
+				children: t('menu.retryPending'),
+			})
+		}
+
+		/** The retry dialog, and the only seat that shows the pending set to a user. */
+		function PendingPurgeDialog({ useRetryRequest, settleRetryRequest, listPending, retryPending, t }) {
+			const request = useRetryRequest((pending) => pending)
+			if (request === null) return null
+			return jsx(PendingPurgeConfirm, { request, settleRetryRequest, listPending, retryPending, t })
+		}
+
+		/**
+		 * One dialog lifetime: the staged set is read when it opens, and the pass runs
+		 * only on request. An entry the Host still holds stays staged and is reported
+		 * as such, so the dialog's answer is never a promise the Host cannot keep.
+		 */
+		function PendingPurgeConfirm({ request, settleRetryRequest, listPending, retryPending, t }) {
+			const [state, setState] = React.useState({ phase: 'reading', value: null, error: null, result: null })
+
+			React.useEffect(() => {
+				let live = true
+				listPending().then(
+					(value) => {
+						if (live) setState((previous) => ({ ...previous, phase: 'ready', value }))
+					},
+					(reason) => {
+						if (live) setState((previous) => ({ ...previous, phase: 'ready', error: describeFailure(reason, t) }))
+					},
+				)
+				return () => {
+					live = false
+				}
+			}, [request.seq])
+
+			const running = state.phase === 'running'
+			const close = () => {
+				if (running) return
+				settleRetryRequest()
+			}
+			const run = () => {
+				setState((previous) => ({ ...previous, phase: 'running', error: null, result: null }))
+				retryPending().then(
+					(result) => {
+						setState((previous) => ({ ...previous, phase: 'ready', result, value: null, error: null }))
+					},
+					(reason) => {
+						setState((previous) => ({ ...previous, phase: 'ready', error: describeFailure(reason, t) }))
+					},
+				)
+			}
+
+			const lines = []
+			if (state.phase === 'reading') lines.push(t('pending.loading'))
+			if (state.phase === 'ready' && state.result === null && state.error === null) {
+				const count = state.value?.sessionIds?.length ?? 0
+				lines.push(count === 0 ? t('pending.none') : t('pending.count', { count }))
+			}
+			if (state.result !== null) {
+				if (state.result.deleted > 0) lines.push(t('pending.done', { count: state.result.deleted }))
+				if (state.result.stillStaged > 0) lines.push(t('pending.still', { count: state.result.stillStaged }))
+				if (state.result.dropped > 0) lines.push(t('pending.drop', { count: state.result.dropped }))
+				if (state.result.deleted === 0 && state.result.stillStaged === 0 && state.result.dropped === 0) {
+					lines.push(t('pending.none'))
+				}
+			}
+
+			return jsxs(primitives.Modal, {
+				open: true,
+				onClose: close,
+				closeLabel: t('close'),
+				title: t('pending.title'),
+				description: t('pending.lead'),
+				footer: jsxs(Fragment, {
+					children: [
+						jsx(primitives.Button, {
+							variant: 'outline',
+							disabled: running,
+							onClick: close,
+							children: t('close'),
+						}),
+						jsx(primitives.Button, {
+							variant: 'outline',
+							disabled: running || state.phase === 'reading',
+							onClick: run,
+							children: running ? t('pending.running') : t('pending.retry'),
+						}),
+					],
+				}),
+				children: [
+					...lines.map((line, index) =>
+						jsx('div', { className: 'dsh-ap-status', role: 'status', children: line }, `line-${String(index)}`),
+					),
+					state.error === null
+						? null
+						: jsx('div', { className: 'dsh-ap-error', role: 'alert', children: t('pending.fail', { message: state.error }) }),
+				],
 			})
 		}
 
@@ -303,11 +455,22 @@ window.__ModuleLoader__.load({
 				deleteRequest.set(null)
 			}
 
-			const deleteSession = async (sessionId) => {
+			/**
+			 * One authenticated Host call on this plugin's route, reduced to its value.
+			 *
+			 * Every verb shares this seat so the refusal envelope is interpreted in
+			 * exactly one place, and the code is carried on the Error so a caller can
+			 * pick its own localized copy — the Host's own text stays as the fallback
+			 * for a code added later.
+			 *
+			 * @param body - the request body, including its `action`.
+			 * @returns the response's `value` field.
+			 */
+			const postRoute = async (body) => {
 				const response = await fetch(new URL(ROUTE_PATH.slice(1), document.baseURI), {
 					method: 'POST',
 					headers: { 'content-type': 'application/json' },
-					body: JSON.stringify({ sessionId }),
+					body: JSON.stringify(body),
 					credentials: 'same-origin',
 				})
 				const text = await response.text()
@@ -322,12 +485,15 @@ window.__ModuleLoader__.load({
 					if (refusal === undefined || refusal === null) {
 						throw new Error(`the Host refused the request (HTTP ${String(response.status)})`)
 					}
-					// Carry the code so the dialog can pick its own localized copy; the
-					// Host's own text stays as the fallback for a code added later.
 					const error = new Error(String(refusal.message ?? 'refused'))
 					error.code = refusal.code
 					throw error
 				}
+				return payload
+			}
+
+			const deleteSession = async (sessionId) => {
+				const payload = await postRoute({ action: ACTION_DELETE, sessionId })
 				// The Host pushes `api-session/removed`, which drops the archived row
 				// immediately; a baseline pull also clears it from "All conversations",
 				// where an unarchived row would otherwise linger until the next refresh.
@@ -339,7 +505,33 @@ window.__ModuleLoader__.load({
 				return payload.value
 			}
 
+			/** What is staged for the next start, without touching it. */
+			const listPending = async () => (await postRoute({ action: ACTION_LIST_PENDING })).value
+
+			/**
+			 * Run the stored cleanup pass right now.
+			 *
+			 * This is the seat that replaces a Host restart: a Session the Host has
+			 * since released is purged on the spot, and one it still holds stays staged
+			 * and is reported back. The Host re-checks every precondition, so nothing
+			 * here can widen what may be deleted.
+			 */
+			const retryPending = async () => (await postRoute({ action: ACTION_RETRY_PENDING })).value
+
 			ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'archive-purge: dictionaries')
+
+			/**
+			 * One retry dialog at a time, on its own store: the cleanup is not tied to a
+			 * Session row, so it must not share the deletion request's slot.
+			 */
+			const retryRequest = createSnapshotStore(null)
+			let retrySeq = 0
+			const requestRetry = () => {
+				retryRequest.set({ seq: (retrySeq += 1) })
+			}
+			const settleRetryRequest = () => {
+				retryRequest.set(null)
+			}
 
 			const rowInjected = () => ({
 				hooks: { archived: archivedSet },
@@ -349,6 +541,12 @@ window.__ModuleLoader__.load({
 				hooks: { deleteRequest },
 				settleDeleteRequest,
 				deleteSession,
+			})
+			const retryInjected = () => ({
+				hooks: { retryRequest },
+				settleRetryRequest,
+				listPending,
+				retryPending,
 			})
 
 			ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
@@ -367,12 +565,27 @@ window.__ModuleLoader__.load({
 				inject: rowInjected,
 			}, DeleteSessionRowButton))
 
+			ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
+				name: 'sidebar.workspaces.session.menu.item',
+				id: 'archive-purge.retry-pending',
+				order: RETRY_MENU_ORDER,
+				locale: NS,
+				inject: retryInjected,
+			}, RetryPendingMenuItem))
+
 			ctx.slots.inject('shell.overlay', () => ctx.slots.register({
 				name: 'shell.overlay',
 				id: 'archive-purge.delete-dialog',
 				locale: NS,
 				inject: dialogInjected,
 			}, DeleteSessionDialog))
+
+			ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+				name: 'shell.overlay',
+				id: 'archive-purge.pending-dialog',
+				locale: NS,
+				inject: retryInjected,
+			}, PendingPurgeDialog))
 		}
 
 		exports.name = 'archive-purge'
