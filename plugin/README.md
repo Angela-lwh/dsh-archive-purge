@@ -28,6 +28,24 @@ Both buttons ship in Simplified Chinese and English, following the app locale.
 
 ## Install
 
+Two shapes work. The **bundle** shape is the documented DSH route and the one recommended
+here, because it needs no second copy of the package and no revisioned row:
+
+```powershell
+# from a checkout of this repo; the path must be absolute
+dsh plugin --profile desktop add file:D:/Project/dsh-archive-purge/plugin
+```
+
+That writes the dependency into the profile's `package.json`, adds `dsh-archive-purge` to its
+`dsh.profile.bundles`, and installs the package into the profile's `node_modules`. This
+package already declares itself a bundle (`dsh.bundle.patch` below), so its row is then
+composed from `cordis.patch.yml` like any other bundle's, and the plugin appears on the
+sidebar's **Plugins** page. The package resolves back to the source directory, so edits under
+`plugin/` are live in the profile without reinstalling — but the row has no `?rev=` query, so
+an already-imported Host module is only re-imported after a DSH restart.
+
+The **file-URL Loader row** shape is what `install.mjs` writes, and it is still supported:
+
 ```powershell
 # default profile is $env:DSH_PROFILE, else "desktop"
 node install.mjs
@@ -36,13 +54,15 @@ node install.mjs --dry-run          # show what would change
 node install.mjs --uninstall        # remove the row and the copied files
 ```
 
-The installer does two things, both outside the profile's package manager on purpose
-(a local plugin that a `pnpm install` may prune is a plugin that silently disappears):
+The installer does two things, outside the profile's package manager on purpose:
 
 1. copies this package to `$DSH_HOME/plugins/dsh-archive-purge/`;
 2. writes one marker-delimited Loader row into
    `$DSH_HOME/profiles/<profile>/cordis.patch.yml`, keeping a timestamped backup of that
    file first.
+
+Its advantage over the bundle shape is the revision, which is the reason the first version
+chose it: a local plugin that a `pnpm install` may prune is a plugin that silently disappears.
 
 The row names the Host half by `file:` URL whose `?rev=` query is a hash of the published
 bytes, and the row's own id carries the same revision. Both matter, and both were
@@ -54,6 +74,11 @@ established by measurement rather than assumption:
 
 With both revisioned, reinstalling takes effect in the running process while unchanged
 bytes keep the same row instead of churning the Loader tree.
+
+Install the bundle, or the row — **not both at the same time**. Two rows both register
+`/api/archive-purge/deleteSession`, and a route is a composition-level contract, so the
+second row's activation fails; if you then remove the first row, no row holds the route any
+more. Toggling the bundle off and on (or restarting DSH) remounts it cleanly.
 
 ## Verify
 

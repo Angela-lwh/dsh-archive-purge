@@ -45,7 +45,13 @@ DeepSeek Harness 能把会话归档，却从来不能删除会话。本工作区
 
 ## 怎么用
 
-要在某个已归档会话上看到按钮：
+先作为 profile bundle 安装（两种安装形态见 `plugin/README.md`）：
+
+```powershell
+dsh plugin --profile desktop add file:D:/Project/dsh-archive-purge/plugin
+```
+
+然后，要在某个已归档会话上看到按钮：
 
 1. 把侧栏视图筛选切到 **仅显示已归档**（或 全部对话）；
 2. 悬停该行点**垃圾桶图标**，或打开它的 `...` 菜单选 **删除会话**；
@@ -74,21 +80,41 @@ DeepSeek Harness 能把会话归档，却从来不能删除会话。本工作区
 
 ### 迭代插件（热部署）
 
-浏览器半包是普通产物、没有构建步骤，而 Loader 行的 revision 取自宿主半包自身的字节，
-所以改完不用重启 app：
+浏览器半包是普通产物、没有构建步骤，而宿主每次变化都会重新快照它，所以改完不用重启 app。
+具体跑什么命令取决于插件的安装形态：
+
+**作为 profile bundle（推荐）**：`dsh plugin --profile <名字> add file:<plugin/ 的绝对路径>`
+会写入依赖、把 `dsh-archive-purge` 加进 `dsh.profile.bundles`，并由 pnpm 把该包链接回 profile 的
+`node_modules` —— 因此在 `plugin/` 下的编辑**立刻可见，无需重新安装**：
 
 | 你改了什么 | 怎么做 | app 会怎样 |
 |---|---|---|
-| `plugin/lib/client.js` | 覆盖到 `$DSH_HOME/plugins/dsh-archive-purge/lib/client.js`（或跑 `install.mjs`），然后刷新一次页面 | 宿主重新快照产物，启动图里该条目的 revision 变化，`/plugins/events` 广播出去，页面随即抓取新的 bundle |
-| `plugin/index.js` | `node install.mjs` | 行 id 与 URL 带上新的内容 revision，宿主导入新的模块代 —— 无需重启 |
-| `plugin/package.json` 的 `dsh.client` | `node install.mjs` | 同 `client.js`；条目列表按声明重建 |
+| `plugin/lib/client.js` | 直接改，然后刷新一次页面 | 宿主重新快照产物，启动图里该条目的 revision 变化，`/plugins/events` 广播出去，页面随即抓取新的 bundle |
+| `plugin/index.js` | 直接改；刷新页面，若已导入的模块必须重新导入则重启 DSH | 宿主下一次导入读到的就是新字节 |
+| `plugin/package.json` 的 `dsh.client` | 直接改，然后刷新一次页面 | 条目列表按声明重建 |
 
-两个坑都值得知道（做这次改动时都踩到了）：
+bundle 形态还会让插件出现在侧栏的 **Plugins** 页里，可以像其他组合包一样开关。开关会重新组合
+profile 并重新挂载该行 —— 这同时也是「某一行激活失败」之后的恢复手段。
 
-- `install.mjs` 会用 `plugin/` **整体替换** `$DSH_HOME/plugins/dsh-archive-purge`。请改
-  `plugin/` 下的源文件，不要改已装副本 —— 下一次安装会把它覆盖掉。
+**作为文件 URL 的 Loader 行**（`node install.mjs`，即第一版的路线）：行 id 与 URL 带上由
+`index.js` 字节推出的 revision，宿主会导入一个真正新的模块代。循环一样，只是多一条命令：
+
+| 你改了什么 | 怎么做 |
+|---|---|
+| `plugin/lib/client.js` | `node install.mjs`，然后刷新一次页面 |
+| `plugin/index.js` | `node install.mjs` |
+| `plugin/package.json` 的 `dsh.client` | `node install.mjs` |
+
+三个坑都值得知道（做这次改动时都踩到了）：
+
+- `install.mjs` 会把 `plugin/` **整体拷贝覆盖**到 `$DSH_HOME/plugins/dsh-archive-purge`
+  （先 `rm -rf`）。请改 `plugin/` 下的源文件，不要改已装副本 —— 下一次安装会把它覆盖掉。
+  这也是更该用 bundle 形态的理由之一：那种形态下根本不存在第二份拷贝。
 - `index.js` **内容没变**时 revision 也不会变，所以重跑 `install.mjs` 对宿主半是空操作。
   这是预期行为而非故障：改字节才会改 revision。
+- 要先装 bundle、**再**退役文件 URL 行。两行都会注册
+  `/api/archive-purge/deleteSession`，而路由是组合级契约：第二行会激活失败，于是你随后退役第一行
+  就再也没有行持有该路由。此时把 bundle 关掉再打开（或重启 DSH）即可干净重挂。
 
 ## 目录结构
 
@@ -190,7 +216,11 @@ ok  the archive set holds exactly what it did before
 ## 回滚
 
 ```powershell
-node install.mjs --uninstall          # 移除 Loader 行与 $DSH_HOME/plugins/dsh-archive-purge
+# bundle 形态：移除组合包与依赖
+dsh plugin --profile desktop remove dsh-archive-purge
+
+# 文件 URL 形态：移除 Loader 行与 $DSH_HOME/plugins/dsh-archive-purge
+node install.mjs --uninstall
 ```
 
 每次安装前都会在 `cordis.patch.yml` 旁留一份带时间戳的副本（`cordis.patch.yml.bak-<timestamp>`），

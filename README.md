@@ -51,7 +51,13 @@ persistence layer's own located paths instead.
 
 ## How to use it
 
-To see the buttons on an archived Session:
+Install it as a profile bundle (see `plugin/README.md` for both install shapes):
+
+```powershell
+dsh plugin --profile desktop add file:D:/Project/dsh-archive-purge/plugin
+```
+
+Then, to see the buttons on an archived Session:
 
 1. switch the sidebar's view filter to **仅显示已归档 / Archived only** (or 全部对话);
 2. hover the archived row and click the **trash icon**, or open its `...` menu and choose
@@ -87,22 +93,48 @@ automatically at every Host start.
 
 ### Iterating on the plugin (hot deploy)
 
-The browser half is a plain artifact — no build step — and the Loader row is revisioned by
-the Host half's own bytes, so an edit is live without restarting the app:
+The browser half is a plain artifact — no build step — and the Host re-snapshots it on every
+change, so an edit is live without restarting the app. What you run depends on how the plugin
+was installed:
+
+**As a profile bundle (recommended).** `dsh plugin --profile <name> add file:<abs path to plugin/>`
+writes the dependency, adds `dsh-archive-purge` to `dsh.profile.bundles`, and pnpm links the
+package back into the profile's `node_modules` — an edit under `plugin/` is visible there
+immediately, with no reinstall:
 
 | you changed | do this | what the app does |
 |---|---|---|
-| `plugin/lib/client.js` | copy it over `$DSH_HOME/plugins/dsh-archive-purge/lib/client.js` (or run `install.mjs`), then reload the page once | the Host re-snapshots the artifact, the boot graph's entry revision changes, `/plugins/events` announces it, and the page fetches the new bundle |
-| `plugin/index.js` | `node install.mjs` | the row id and URL carry the new content revision, so the Host imports the new module generation — no restart |
-| `plugin/package.json`'s `dsh.client` | `node install.mjs` | same as `client.js`; the entry list is rebuilt from the declaration |
+| `plugin/lib/client.js` | edit it, then reload the page once | the Host re-snapshots the artifact, the boot graph's entry revision changes, `/plugins/events` announces it, and the page fetches the new bundle |
+| `plugin/index.js` | edit it; reload the page, and restart DSH if an already-imported module must be re-imported | the new bytes are what the Host imports next |
+| `plugin/package.json`'s `dsh.client` | edit it, then reload the page | the entry list is rebuilt from the declaration |
+
+The bundle route also puts the plugin on the sidebar's **Plugins** page, so it can be switched
+off and on like any other bundle. Enable/disable recomposes the profile and remounts the row,
+which is also the way to recover a row whose activation failed.
+
+**As a file-URL Loader row** (`node install.mjs`, the first version's route): the row id and
+its URL carry a revision derived from `index.js`'s bytes, so the Host imports a genuinely new
+module generation. Same loop, one extra command:
+
+| you changed | do this |
+|---|---|
+| `plugin/lib/client.js` | `node install.mjs`, then reload the page once |
+| `plugin/index.js` | `node install.mjs` |
+| `plugin/package.json`'s `dsh.client` | `node install.mjs` |
 
 Two traps worth knowing, both hit while building this change:
 
-- `install.mjs` **replaces** `$DSH_HOME/plugins/dsh-archive-purge` from `plugin/` wholesale.
-  Edit the source under `plugin/`, never the installed copy — the next install overwrites it.
+- `install.mjs` copies `plugin/` over `$DSH_HOME/plugins/dsh-archive-purge` wholesale
+  (`rm -rf` first). Edit the source under `plugin/`, never the installed copy — the next
+  install overwrites it. This is one more reason to prefer the bundle route, where there is
+  no second copy at all.
 - An **unchanged** `index.js` keeps its revision, so re-running `install.mjs` is a no-op for
   the Host half. That is the intended behaviour, not a failure: change the bytes to change
   the revision.
+- Install the bundle **before** retiring any file-URL row. Two rows both register
+  `/api/archive-purge/deleteSession`, and the route is a composition-level contract: the
+  second row's activation fails, so retiring the first row afterwards leaves no row holding
+  the route. Disable and re-enable the bundle (or restart DSH) to remount it cleanly.
 
 ## Layout
 
@@ -219,7 +251,11 @@ again — fully reversible).
 ## Reverting
 
 ```powershell
-node install.mjs --uninstall          # removes the Loader row and $DSH_HOME/plugins/dsh-archive-purge
+# bundle shape: drop the bundle and its dependency
+dsh plugin --profile desktop remove dsh-archive-purge
+
+# file-URL shape: removes the Loader row and $DSH_HOME/plugins/dsh-archive-purge
+node install.mjs --uninstall
 ```
 
 A timestamped copy of `cordis.patch.yml` from before every install sits beside it
