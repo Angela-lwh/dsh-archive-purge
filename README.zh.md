@@ -84,17 +84,27 @@ dsh plugin --profile desktop add file:D:/Project/dsh-archive-purge/plugin
 具体跑什么命令取决于插件的安装形态：
 
 **作为 profile bundle（推荐）**：`dsh plugin --profile <名字> add file:<plugin/ 的绝对路径>`
-会写入依赖、把 `dsh-archive-purge` 加进 `dsh.profile.bundles`，并由 pnpm 把该包链接回 profile 的
-`node_modules` —— 因此在 `plugin/` 下的编辑**立刻可见，无需重新安装**：
+会写入依赖、把 `dsh-archive-purge` 加进 `dsh.profile.bundles`，并把该包**物化**进 profile 的
+`node_modules`。这份物化是**安装那一刻冻结的硬链接农场**，不是指向源目录的活动窗口 —— 本机实测：
+pnpm 硬链接过的文件能看到之后对源的**原地写入**，但源被「替换式改写」过的文件会一直保留旧字节，
+而安装之后**新增**的文件（如 `locale/`）根本不会出现。所以要让改动进入 profile，必须重新物化：
+
+```powershell
+Remove-Item $env:DSH_HOME\profiles\<名字>\node_modules\dsh-archive-purge -Recurse -Force
+dsh plugin --profile <名字> add file:<plugin/ 的绝对路径>
+```
+
+不先删就重装是空操作：pnpm 会说 `Already up to date`，旧农场原样不动。
 
 | 你改了什么 | 怎么做 | app 会怎样 |
 |---|---|---|
 | `plugin/lib/client.js` | 直接改，然后刷新一次页面 | 宿主重新快照产物，启动图里该条目的 revision 变化，`/plugins/events` 广播出去，页面随即抓取新的 bundle |
 | `plugin/index.js` | 直接改；刷新页面，若已导入的模块必须重新导入则重启 DSH | 宿主下一次导入读到的就是新字节 |
-| `plugin/package.json` 的 `dsh.client` | 直接改，然后刷新一次页面 | 条目列表按声明重建 |
+| `plugin/package.json` 的 `dsh.client`，或新增文件（如 `locale/`） | 重新物化（见上），然后刷新一次页面 | 条目列表按声明重建，profile 也能看到新文件 |
 
-bundle 形态还会让插件出现在侧栏的 **Plugins** 页里，可以像其他组合包一样开关。开关会重新组合
-profile 并重新挂载该行 —— 这同时也是「某一行激活失败」之后的恢复手段。
+bundle 形态还会让插件出现在侧栏的 **Plugins** 页里（标题描述取自 `locale/<lang>.json`），
+可以像其他组合包一样开关。开关会重新组合 profile 并重新挂载该行 —— 这同时也是「某一行激活
+失败」之后的恢复手段。
 
 **作为文件 URL 的 Loader 行**（`node install.mjs`，即第一版的路线）：行 id 与 URL 带上由
 `index.js` 字节推出的 revision，宿主会导入一个真正新的模块代。循环一样，只是多一条命令：

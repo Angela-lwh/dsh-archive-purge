@@ -24,7 +24,13 @@ On any **archived** Session row:
   cannot be undone. Only the archived row offers either affordance — a live or merely
   unarchived Session is never a target.
 
-Both buttons ship in Simplified Chinese and English, following the app locale.
+A second menu row, **完成待删除清理 / Finish pending deletions** (`order: 600`), opens the
+deferred-purge seat: it reads the pending store, runs the stored pass on request, and reports
+what each entry did.
+
+Both buttons ship in Simplified Chinese and English, following the app locale, and installed
+as a bundle the plugin's own card on the Plugins page reads `locale/en.json` and
+`locale/zh.json` for its title and description.
 
 ## Install
 
@@ -40,9 +46,21 @@ That writes the dependency into the profile's `package.json`, adds `dsh-archive-
 `dsh.profile.bundles`, and installs the package into the profile's `node_modules`. This
 package already declares itself a bundle (`dsh.bundle.patch` below), so its row is then
 composed from `cordis.patch.yml` like any other bundle's, and the plugin appears on the
-sidebar's **Plugins** page. The package resolves back to the source directory, so edits under
-`plugin/` are live in the profile without reinstalling — but the row has no `?rev=` query, so
-an already-imported Host module is only re-imported after a DSH restart.
+sidebar's **Plugins** page with the `locale/<lang>.json` title and description.
+
+The materialization is a **hard-link farm frozen at install time**, not a live window on this
+directory. Measured: a file pnpm hard-linked does see later in-place edits to the source, but a
+file whose source was replaced afterwards keeps its stale bytes, and a file added later
+(`locale/`) never appears at all. Bring an edit into the profile by re-materializing —
+reinstalling without removing first is a no-op (`Already up to date`):
+
+```powershell
+Remove-Item $env:DSH_HOME\profiles\<name>\node_modules\dsh-archive-purge -Recurse -Force
+dsh plugin --profile <name> add file:<abs path to plugin/>
+```
+
+The row has no `?rev=` query, so an already-imported Host module is only re-imported after a
+DSH restart; the browser half needs a page reload.
 
 The **file-URL Loader row** shape is what `install.mjs` writes, and it is still supported:
 

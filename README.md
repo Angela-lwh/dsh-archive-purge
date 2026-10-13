@@ -98,19 +98,31 @@ change, so an edit is live without restarting the app. What you run depends on h
 was installed:
 
 **As a profile bundle (recommended).** `dsh plugin --profile <name> add file:<abs path to plugin/>`
-writes the dependency, adds `dsh-archive-purge` to `dsh.profile.bundles`, and pnpm links the
-package back into the profile's `node_modules` — an edit under `plugin/` is visible there
-immediately, with no reinstall:
+writes the dependency, adds `dsh-archive-purge` to `dsh.profile.bundles`, and materializes the
+package into the profile's `node_modules`. That materialization is a **hard-link farm frozen at
+install time**, not a live window on the source — measured on this machine: a file pnpm
+hard-linked sees later in-place edits to the source, but a file whose source was replaced
+afterwards keeps its stale bytes, and a file added later (`locale/`) never appears at all. So
+syncing an edit means re-materializing:
+
+```powershell
+Remove-Item $env:DSH_HOME\profiles\<name>\node_modules\dsh-archive-purge -Recurse -Force
+dsh plugin --profile <name> add file:<abs path to plugin/>
+```
+
+Reinstalling without removing first is a no-op: pnpm reports `Already up to date` and leaves
+the old farm in place.
 
 | you changed | do this | what the app does |
 |---|---|---|
 | `plugin/lib/client.js` | edit it, then reload the page once | the Host re-snapshots the artifact, the boot graph's entry revision changes, `/plugins/events` announces it, and the page fetches the new bundle |
 | `plugin/index.js` | edit it; reload the page, and restart DSH if an already-imported module must be re-imported | the new bytes are what the Host imports next |
-| `plugin/package.json`'s `dsh.client` | edit it, then reload the page | the entry list is rebuilt from the declaration |
+| `plugin/package.json`'s `dsh.client`, or a new file such as `locale/` | re-materialize (above), then reload the page | the entry list is rebuilt from the declaration, and the profile sees the new files |
 
-The bundle route also puts the plugin on the sidebar's **Plugins** page, so it can be switched
-off and on like any other bundle. Enable/disable recomposes the profile and remounts the row,
-which is also the way to recover a row whose activation failed.
+The bundle route also puts the plugin on the sidebar's **Plugins** page, showing the
+`locale/<lang>.json` title and description, and lets it be switched off and on like any other
+bundle. Enable/disable recomposes the profile and remounts the row, which is also the way to
+recover a row whose activation failed.
 
 **As a file-URL Loader row** (`node install.mjs`, the first version's route): the row id and
 its URL carry a revision derived from `index.js`'s bytes, so the Host imports a genuinely new
