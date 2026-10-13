@@ -1,7 +1,7 @@
 {
   "name": "dsh-archive-purge",
   "version": "1.0.0",
-  "private": true,
+  "private": false,
   "description": "Delete action for archived DeepSeek Harness sessions: permanently removes the session log, its Workspace membership, and its archive mark.",
   "keywords": [
     "dsh-plugin",
@@ -22,10 +22,16 @@
     "index.js",
     "lib/client.js",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "locale"
   ],
   "engines": {
     "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Angela-lwh/dsh-archive-purge.git",
+    "directory": "plugin"
   },
   "dsh": {
     "manifestVersion": 1,

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Archive purge",
+    "description": "Permanently delete an archived session: releases the session the Host is still holding and removes its log, workspace membership, and archive mark."
+  }
+}
