@@ -38,8 +38,11 @@ Two shapes work. The **bundle** shape is the documented DSH route and the one re
 here, because it needs no second copy of the package and no revisioned row:
 
 ```powershell
-# from a checkout of this repo; the path must be absolute
-dsh plugin --profile desktop add file:D:/Project/dsh-archive-purge/plugin
+# from the npm registry — no checkout needed
+dsh plugin --profile desktop add dsh-archive-purge
+
+# or from a checkout of this repo; the path must be absolute
+dsh plugin --profile desktop add file:<absolute path to this repo>/plugin
 ```
 
 That writes the dependency into the profile's `package.json`, adds `dsh-archive-purge` to its

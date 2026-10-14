@@ -1,242 +1,212 @@
-# dsh-archive-purge — a delete button for archived DSH sessions
+# dsh-archive-purge —— 给已归档的 DSH 会话加一个删除按钮
 
-DeepSeek Harness can archive a Session but has never been able to delete one. This
-workspace contains a working plugin that adds that verb, plus the research and test
-harnesses that established how to do it safely against a live Harness.
+[English](README.en.md) | **中文**
 
-**Status: installed and verified on this machine** (`desktop` profile, GUI at
-`http://127.0.0.1:19387`).
+DeepSeek Harness 能把会话归档，却从来不能删除会话。本工作区包含一个可用插件，为它补上这个动作，
+外加一套调研与测试工具——它们确定了怎么在一个正在运行的 Harness 上安全地做这件事。
+
+**状态：已在本机安装并验证**（`desktop` profile，GUI 位于 `http://127.0.0.1:19387`）。
 
 | | |
 |---|---|
-| Host entry | live Loader row `archive-purge-<revision>` → `fiberPhase: active` |
-| Menu row | `sidebar.workspaces.session.menu.item` → `archive-purge.delete`, order 500 (after Archive 400) → `active` |
-| Hover button | `sidebar.workspaces.session.row.action` → `archive-purge.delete`, order 300 (after Archive 100, Pin 200) → `active` |
-| Route | `POST /api/archive-purge/deleteSession` → authenticated, all probes green |
-| Patch row | `$DSH_HOME/profiles/desktop/cordis.patch.yml`, marker-delimited block, timestamped backup kept |
+| 宿主行 | 活动 Loader 行 `archive-purge-<revision>` → `fiberPhase: active` |
+| 菜单项 | `sidebar.workspaces.session.menu.item` → `archive-purge.delete`，order 500（排在官方 Archive 400 之后）→ `active` |
+| 悬停按钮 | `sidebar.workspaces.session.row.action` → `archive-purge.delete`，order 300（排在官方 Archive 100、Pin 200 之后）→ `active` |
+| 路由 | `POST /api/archive-purge/deleteSession` → 走鉴权，全部探针通过 |
+| 补丁行 | `$DSH_HOME/profiles/desktop/cordis.patch.yml`，标记包裹的块，保留带时间戳的备份 |
 
-## First real use, and what it exposed
+**延后删除在生产路径上跑通了**：你确认删除的那个真实归档会话（标题不在此公开），在本次启动时由插件自动从磁盘移除 ——
+`$DSH_HOME/archive-purge/pending.json` 已清空，归档集合已清空，该会话目录已不存在。整个过程无需你再次点击。
 
-The first click on a real archived Session — its title is withheld here — was refused with
-`archive-purge/session-live`. The diagnosis was worth the detour:
+## 首次真实使用，以及它暴露了什么
 
-- the Session was still **loaded** by the Host (idle, not running) because it had just been
-  open — and a loaded Session stays loaded for the Host's whole lifetime. Measured:
-  `tools/watch-liveness.mjs` polled for six minutes and the loaded set never changed;
-- it looked like it **cannot be unloaded** from a plugin: `ctx.sessions.enter()` throws for an
-  id already in the store, the Client's release never reaches the Host, and the Agent's
-  registration belongs to a Cordis effect inside the `agents` service;
-- deleting the log anyway was not an option either: `sessionQuery.listSessions()` is the
-  union of the in-memory store and the persisted headers, so the row would have come
-  back — unopenable.
+第一次点真实归档会话时被拒绝，错误码 `archive-purge/session-live`。诊断这个问题的绕路是值得的：
 
-So the plugin grew a **deferred mode**: a loaded Session's purge is staged (history
-untouched; the archive mark kept as both the authorization and the cancel switch) and
-finished automatically at the next Host start, when nothing is loaded. The dialog says so in
-both languages — and that is exactly how the Session above was eventually removed.
+- 该会话仍被宿主**加载**着（空闲，没有在跑），因为你刚打开过它 —— 而**只要被加载过，宿主就会持有它直到进程结束**。
+  实测：`tools/watch-liveness.mjs` 连续轮询 6 分钟，已加载集合一次都没变；
+- 插件**无法卸载它**：对已在存储里的 id，`ctx.sessions.enter()` 直接抛错；客户端的释放根本不会到达宿主；
+  Agent 的注册被 `agents` 服务内部的 Cordis effect 持有；
+- 那就硬删日志也不行：`sessionQuery.listSessions()` 是「内存存储 ∪ 已持久化 header」的并集，
+  所以那一行会在下次刷新**回来**，而且因为没有日志而点不开。
 
-Deferred mode turned out to be only half the answer, because "the next start" meant "restart
-DSH for a deletion you already confirmed". The measured runtime shows the release *is*
-reachable from a plugin after all: both `ctx.sessions`' store entry and `ctx.agents`' registry
-entry expose the `detach` closure that owns their lifecycle edge, and calling both leaves the
-Session genuinely unloaded (`loaded after both detaches: false`, measured on the running
-desktop Host). So a confirmed deletion now **releases an archived idle Session and deletes it
-on the spot**; the staged path remains only for Sessions that report work in progress or that
-the plugin could not release.
+于是插件长出了一个**延后模式**：被加载的会话，其删除会被**登记**（历史原样不动；归档标记保留，
+它既是授权也是撤销开关），并在下次宿主启动、无人持有时自动完成。弹窗用中英双语明确说明这一点。
+本次启动正是这样把它删掉的。
 
-Two smaller truths came out of the same detour, both now encoded in the plugin: the desktop
-Host does **not** export `DSH_HOME` to its own process, and a `!!js dshHomePath(...)` Loader
-row keeps an *unevaluated* `{"__jsExpr": …}` marker — so the Harness home is derived from the
-persistence layer's own located paths instead.
+但延后只是半个答案：所谓「下次启动」等于「为了一个你已经确认过的删除去重启 DSH」。继续实测后
+发现，**卸载入口其实是插件够得着的**：`ctx.sessions` 的 store 条目与 `ctx.agents` 的注册条目各自
+暴露了持有其生命周期边的 `detach` 闭包，两者都调用之后会话确实不再被加载（在运行中的桌面宿主上
+实测 `loaded after both detaches: false`）。所以现在确认删除会**直接释放已归档且空闲的会话并当场删除**；
+延后路径只留给「正在干活」或插件释放不掉的会话。
 
-## How to use it
+同一趟绕路还挖出两个较小的事实，两者都已写进插件：桌面宿主**不会**把 `DSH_HOME` 导出给它自己的进程；
+而 `!!js dshHomePath(...)` 的 Loader 行在配置里保留着**未求值的** `{"__jsExpr": …}` 标记 ——
+因此 Harness home 改为从持久化层自己 `locate()` 出来的真实路径反推。
 
-Install it as a profile bundle (see `plugin/README.md` for both install shapes):
+## 怎么用
+
+先作为 profile bundle 安装（两种安装形态见 `plugin/README.md`）：
 
 ```powershell
-dsh plugin --profile desktop add file:D:/Project/dsh-archive-purge/plugin
+# 已发布到 npm 之后：不需要检出仓库
+dsh plugin --profile desktop add dsh-archive-purge
+
+# 或者从本地检出安装；路径必须是绝对路径
+dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 ```
 
-Then, to see the buttons on an archived Session:
+然后，要在某个已归档会话上看到按钮：
 
-1. switch the sidebar's view filter to **仅显示已归档 / Archived only** (or 全部对话);
-2. hover the archived row and click the **trash icon**, or open its `...` menu and choose
-   **删除会话 / Delete session**;
-3. confirm in the dialog. An **archived, idle** Session is deleted outright, even while the
-   Host is still holding it in memory: the plugin releases that hold first (the Host pushes
-   `api-session/removed`) and then removes the log directory. A Session with work in progress
-   is refused; one the plugin could not release is **staged** and removed at the next start,
-   and the dialog says so in both languages.
+1. 把侧栏视图筛选切到 **仅显示已归档**（或 全部对话）；
+2. 悬停该行点**垃圾桶图标**，或打开它的 `...` 菜单选 **删除会话**；
+3. 在弹窗里确认。**已归档且空闲**的会话会当场删除，即使宿主此刻仍把它持在内存里：插件先释放这份
+   持有（宿主推送 `api-session/removed`），随后移除日志目录。正在干活的会话会被拒绝；插件释放不掉的
+   才会被**登记**、留到下次启动移除 —— 两种情况弹窗都会如实写明。
 
-If the buttons do not appear, reload the page once (Ctrl+R). The Host half needed no
-restart: the profile is a live-patch profile and the entry is already `active`.
+如果按钮没出现，刷新一次页面（Ctrl+R）。宿主侧不需要重启：该 profile 是热补丁 profile，行已经是 `active`。
 
-A staged purge is recorded in `$DSH_HOME/archive-purge/pending.json`, and the deferred run
-at the next start empties that file again. Unarchiving a Session before then cancels its
-staged purge. To stage one from a shell instead, `node tools/purge.mjs <sessionId>`; to see
-what is currently staged, read that JSON file.
+已登记的删除记在 `$DSH_HOME/archive-purge/pending.json`，下次启动的延后执行会把它清空。
+在此之前**取消归档即可撤销**一次已登记的删除。想从命令行登记一个会话，用
+`node tools/purge.mjs <sessionId>`；想看当前登记了什么，读那个 JSON 文件。
 
-### Finishing a staged purge without restarting
+### 不重启也能完成已登记的删除
 
-Nothing normally stages any more, but a staged entry can still exist — it comes from an older
-run, or from a Session the plugin could not release. It need not wait for the next DSH start:
+正常情况下已经不会再产生登记项，但登记项仍可能存在 —— 来自更早的运行，或来自插件释放不掉的会话。
+它不必再等下次启动：
 
-1. open any Session row's `...` menu and choose **完成待删除清理 / Finish pending deletions**;
-2. the dialog reads the pending store and tells you how many Sessions are waiting;
-3. press **立即清理 / Clean up now**.
+1. 打开任意会话行的 `...` 菜单，选 **完成待删除清理**；
+2. 弹窗会读取待删除登记，告诉你有多少个会话在等待；
+3. 点 **立即清理**。
 
-Every entry whose Session is now releasable is released and deleted on the spot; one that
-still cannot be released stays staged and the dialog says so. Nothing here widens what may be
-deleted: each entry re-enters the same purge path, which re-checks the archive mark, the
-running Agent, the target directory and the loaded state. The same pass also runs
-automatically at every Host start.
+此时能释放的条目会**当场释放并删除**；仍释放不掉的会继续留在登记里，弹窗会如实说明。这里不会
+放宽任何可删范围：每个条目都重新走同一条删除路径，重新校验归档标记、运行中的 Agent、目标目录与
+加载状态。同样的这一遍也会在每次宿主启动时自动执行。
 
-### Iterating on the plugin (hot deploy)
+### 迭代插件（热部署）
 
-The browser half is a plain artifact — no build step — and the Host re-snapshots it on every
-change, so an edit is live without restarting the app. What you run depends on how the plugin
-was installed:
+浏览器半包是普通产物、没有构建步骤，而宿主每次变化都会重新快照它，所以改完不用重启 app。
+具体跑什么命令取决于插件的安装形态：
 
-**As a profile bundle (recommended).** `dsh plugin --profile <name> add file:<abs path to plugin/>`
-writes the dependency, adds `dsh-archive-purge` to `dsh.profile.bundles`, and materializes the
-package into the profile's `node_modules`. That materialization is a **hard-link farm frozen at
-install time**, not a live window on the source — measured on this machine: a file pnpm
-hard-linked sees later in-place edits to the source, but a file whose source was replaced
-afterwards keeps its stale bytes, and a file added later (`locale/`) never appears at all. So
-syncing an edit means re-materializing:
+**作为 profile bundle（推荐）**：`dsh plugin --profile <名字> add file:<plugin/ 的绝对路径>`
+会写入依赖、把 `dsh-archive-purge` 加进 `dsh.profile.bundles`，并把该包**物化**进 profile 的
+`node_modules`。这份物化是**安装那一刻冻结的硬链接农场**，不是指向源目录的活动窗口 —— 本机实测：
+pnpm 硬链接过的文件能看到之后对源的**原地写入**，但源被「替换式改写」过的文件会一直保留旧字节，
+而安装之后**新增**的文件（如 `locale/`）根本不会出现。所以要让改动进入 profile，必须重新物化：
 
 ```powershell
-Remove-Item $env:DSH_HOME\profiles\<name>\node_modules\dsh-archive-purge -Recurse -Force
-dsh plugin --profile <name> add file:<abs path to plugin/>
+Remove-Item $env:DSH_HOME\profiles\<名字>\node_modules\dsh-archive-purge -Recurse -Force
+dsh plugin --profile <名字> add file:<plugin/ 的绝对路径>
 ```
 
-Reinstalling without removing first is a no-op: pnpm reports `Already up to date` and leaves
-the old farm in place.
+不先删就重装是空操作：pnpm 会说 `Already up to date`，旧农场原样不动。
 
-| you changed | do this | what the app does |
+| 你改了什么 | 怎么做 | app 会怎样 |
 |---|---|---|
-| `plugin/lib/client.js` | edit it, then reload the page once | the Host re-snapshots the artifact, the boot graph's entry revision changes, `/plugins/events` announces it, and the page fetches the new bundle |
-| `plugin/index.js` | edit it; reload the page, and restart DSH if an already-imported module must be re-imported | the new bytes are what the Host imports next |
-| `plugin/package.json`'s `dsh.client`, or a new file such as `locale/` | re-materialize (above), then reload the page | the entry list is rebuilt from the declaration, and the profile sees the new files |
+| `plugin/lib/client.js` | 直接改，然后刷新一次页面 | 宿主重新快照产物，启动图里该条目的 revision 变化，`/plugins/events` 广播出去，页面随即抓取新的 bundle |
+| `plugin/index.js` | 直接改；刷新页面，若已导入的模块必须重新导入则重启 DSH | 宿主下一次导入读到的就是新字节 |
+| `plugin/package.json` 的 `dsh.client`，或新增文件（如 `locale/`） | 重新物化（见上），然后刷新一次页面 | 条目列表按声明重建，profile 也能看到新文件 |
 
-The bundle route also puts the plugin on the sidebar's **Plugins** page, showing the
-`locale/<lang>.json` title and description, and lets it be switched off and on like any other
-bundle. Enable/disable recomposes the profile and remounts the row, which is also the way to
-recover a row whose activation failed.
+bundle 形态还会让插件出现在侧栏的 **Plugins** 页里（标题描述取自 `locale/<lang>.json`），
+可以像其他组合包一样开关。开关会重新组合 profile 并重新挂载该行 —— 这同时也是「某一行激活
+失败」之后的恢复手段。
 
-**As a file-URL Loader row** (`node install.mjs`, the first version's route): the row id and
-its URL carry a revision derived from `index.js`'s bytes, so the Host imports a genuinely new
-module generation. Same loop, one extra command:
+**作为文件 URL 的 Loader 行**（`node install.mjs`，即第一版的路线）：行 id 与 URL 带上由
+`index.js` 字节推出的 revision，宿主会导入一个真正新的模块代。循环一样，只是多一条命令：
 
-| you changed | do this |
+| 你改了什么 | 怎么做 |
 |---|---|
-| `plugin/lib/client.js` | `node install.mjs`, then reload the page once |
+| `plugin/lib/client.js` | `node install.mjs`，然后刷新一次页面 |
 | `plugin/index.js` | `node install.mjs` |
-| `plugin/package.json`'s `dsh.client` | `node install.mjs` |
+| `plugin/package.json` 的 `dsh.client` | `node install.mjs` |
 
-Two traps worth knowing, both hit while building this change:
+三个坑都值得知道（做这次改动时都踩到了）：
 
-- `install.mjs` copies `plugin/` over `$DSH_HOME/plugins/dsh-archive-purge` wholesale
-  (`rm -rf` first). Edit the source under `plugin/`, never the installed copy — the next
-  install overwrites it. This is one more reason to prefer the bundle route, where there is
-  no second copy at all.
-- An **unchanged** `index.js` keeps its revision, so re-running `install.mjs` is a no-op for
-  the Host half. That is the intended behaviour, not a failure: change the bytes to change
-  the revision.
-- Install the bundle **before** retiring any file-URL row. Two rows both register
-  `/api/archive-purge/deleteSession`, and the route is a composition-level contract: the
-  second row's activation fails, so retiring the first row afterwards leaves no row holding
-  the route. Disable and re-enable the bundle (or restart DSH) to remount it cleanly.
+- `install.mjs` 会把 `plugin/` **整体拷贝覆盖**到 `$DSH_HOME/plugins/dsh-archive-purge`
+  （先 `rm -rf`）。请改 `plugin/` 下的源文件，不要改已装副本 —— 下一次安装会把它覆盖掉。
+  这也是更该用 bundle 形态的理由之一：那种形态下根本不存在第二份拷贝。
+- `index.js` **内容没变**时 revision 也不会变，所以重跑 `install.mjs` 对宿主半是空操作。
+  这是预期行为而非故障：改字节才会改 revision。
+- 要先装 bundle、**再**退役文件 URL 行。两行都会注册
+  `/api/archive-purge/deleteSession`，而路由是组合级契约：第二行会激活失败，于是你随后退役第一行
+  就再也没有行持有该路由。此时把 bundle 关掉再打开（或重启 DSH）即可干净重挂。
 
-## Layout
+## 目录结构
 
-| path | what it is |
+| 路径 | 说明 |
 |---|---|
-| `plugin/` | the plugin: `index.js` (Host half), `lib/client.js` (hand-written browser bundle), `package.json`, `cordis.patch.yml`, `README.md` |
-| `plugin/README.md` | the plugin's own documentation — design, seams, what it deletes, limits |
-| `install.mjs` | install / uninstall / dry-run for one profile, with revisioned Loader rows |
-| `tools/test-host.mjs` | Host half against a throwaway session root: every refusal + a real recursive delete |
-| `tools/test-client.mjs` | browser bundle against a fake `__ModuleLoader__`, module table, React, and `fetch` |
-| `tools/test-route.mjs` | the **running** Host end to end: trust fence, cookie, routing, JSON contract |
-| `tools/e2e-delete.mjs` | creates + archives one throwaway Session through the product's own API, then probes the guards |
-| `tools/e2e-immediate-delete.mjs` | **the confirmed-deletion path**: creates + archives a throwaway Session the Host is still holding, deletes it in one call, and audits the reply, the disk, the archive mark, the pending store, and `session/list` |
-| `tools/e2e-forged-delete.mjs` | **the real destructive run** (`--staged` for the deferred path): manufactures a stored Session, hands it to the plugin, audits the disk and every durable store, and cleans up |
-| `tools/purge.mjs` | call the deletion route from a shell |
-| `tools/remote.mjs` | call any Remote namespace/method from a shell (file-based I/O, so PowerShell quoting cannot mangle it) |
-| `tools/watch-liveness.mjs` | watch whether the Host ever releases loaded Sessions |
-| `tools/verify-paths.mjs` | the session-directory derivation, checked against every real Session header |
-| `tools/cycle.mjs` | force one fresh Host-side import while iterating on a live profile |
-| `tools/asar.mjs` | list / cat / extract-tree inside the shipped `app.asar` |
-| `vendor/` | read-only extracts of the DSH packages this work depends on |
-| `REPORT-host-rpc.md`, `REPORT-delete-archived-session.md` | the two research reports: client→Host seams, and session/Workspace durable state |
+| `plugin/` | 插件本体：`index.js`（宿主半）、`lib/client.js`（手写的浏览器 bundle）、`package.json`、`cordis.patch.yml`、`README.md` |
+| `plugin/README.md` | 插件自己的文档 —— 设计、扩展点、删什么不删什么、限制 |
+| `install.mjs` | 单 profile 的安装 / 卸载 / dry-run，Loader 行带 revision |
+| `tools/test-host.mjs` | 宿主半对临时会话根：所有拒绝分支 + 一次真实的递归删除 |
+| `tools/test-client.mjs` | 浏览器 bundle 对假的 `__ModuleLoader__`、模块表、React 与 `fetch` |
+| `tools/test-route.mjs` | **正在运行**的宿主端到端：信任栅栏、cookie、路由、JSON 契约 |
+| `tools/e2e-delete.mjs` | 用产品自己的 API 建一个一次性会话并归档，然后探测各条保护 |
+| `tools/e2e-immediate-delete.mjs` | **确认删除的正常路径**：建一个仍被宿主持有的已归档会话，一次调用删掉，并核验响应、磁盘、归档标记、待删除登记与 `session/list` |
+| `tools/e2e-forged-delete.mjs` | **真实破坏性测试**（`--staged` 走延后路径）：制造一个真实存储的会话，交给插件删除，核验磁盘与全部持久状态并清理 |
+| `tools/purge.mjs` | 从命令行调用删除路由 |
+| `tools/remote.mjs` | 从命令行调用任意 Remote namespace/method（用文件传参，避免 PowerShell 引号把 JSON 弄坏） |
+| `tools/watch-liveness.mjs` | 观察宿主是否会自行释放已加载的会话 |
+| `tools/verify-paths.mjs` | 会话目录推导，对照每一个真实会话 header |
+| `tools/cycle.mjs` | 在热 profile 上强制一次全新的宿主侧导入 |
+| `tools/asar.mjs` | 列出 / 读取 / 提取发行版 `app.asar` 内部文件 |
+| `vendor/` | 本次工作依赖的 DSH 包的只读提取 |
+| `REPORT-host-rpc.md`、`REPORT-delete-archived-session.md` | 两份调研报告：客户端→宿主扩展点，以及会话/Workspace 的持久状态 |
 
-## What the research established
+## 调研确认了什么
 
-These are not in DSH's public docs, and each one changed the design:
+以下几条都不在 DSH 的公开文档里，而每一条都改变了设计：
 
-**1. `ctx.connection.rpc.handle()` — the seam DSH's own docs point at — is broken in this
-build.** It reads `webServer` through the Connection *service's* Context, which does not
-declare that service in its `inject`, so Cordis' strict accessor throws
-`cannot get property "webServer" without inject` from inside `register()`
-(`dsh-client-connection/lib/index.js:656`). The plugin surfaces as a `FAILED` fiber with no
-message anywhere. The working seam is `ctx.connection.fetch.register()`, an exact route on
-the shared `/api` Fetch handler: matched before the Gateway's Remote interceptor, and
-authenticated for free because the `/api` prefix route runs `connection.admit()` (Host/Origin
-fence → signed cookie) before dispatching.
+**1. DSH 文档自己指向的扩展点 `ctx.connection.rpc.handle()`，在这个版本里是坏的。**
+它通过 Connection *服务自身*的 Context 去读 `webServer`，而那个 Context 的 `inject` 里没有声明该服务，
+于是被 Cordis 的严格断言在 `register()` 内部直接拒绝：
+`cannot get property "webServer" without inject`（`dsh-client-connection/lib/index.js:656`）。
+表现是整条插件行变成 `FAILED` fiber，且**任何地方都看不到原因**。可用的是
+`ctx.connection.fetch.register()`：挂在共享 `/api` Fetch handler 上的**精确**路由 ——
+在 Gateway 的 Remote 拦截器之前匹配，并且**免费继承鉴权**，因为 `/api` 前缀路由在分发前会先跑
+`connection.admit()`（Host/Origin 栅栏 → 签名 cookie）。
 
-**2. Deleting a Session means deleting a directory, and only that directory.** There is no
-deletion API anywhere: `sessionPersistence`'s seam is `create/open/stat/list/flush`;
-`workspaceRegistry.delete()` removes a Workspace registration. A Session owns exactly
-`<sessionsRoot>/<projectKey(cwd)>/<encodeSegment(id)>/` — log generations only, no lock file
-on Windows. The one durable store that must also change is `$DSH_HOME/storages/workspace.json`
-(the `workspace` domain: membership, archive set, pin set), reachable through
-`Workspace.detachSession()` and `workspaceRegistry.unarchiveSession()`. The SQLite search
-index is `:memory:`/`openAt: never` here and self-prunes when enabled; the projection cache
-row is inert; attachments are shared content-addressed blobs that must **not** be touched.
+**2. 删除会话＝删掉那个目录，而且只能是那个目录。** 全库没有任何删除 API：
+`sessionPersistence` 的接口只有 `create/open/stat/list/flush`；`workspaceRegistry.delete()`
+删的是 Workspace 注册。一个会话恰好拥有
+`<sessionsRoot>/<projectKey(cwd)>/<encodeSegment(id)>/` —— 里面只有日志世代，Windows 上连锁文件都没有。
+真正需要一并修改的持久存储只有 `$DSH_HOME/storages/workspace.json`（`workspace` 域：成员关系、
+归档集合、置顶集合），通过 `Workspace.detachSession()` 与 `workspaceRegistry.unarchiveSession()` 触达。
+SQLite 搜索索引在本机是 `:memory:` / `openAt: never`，启用时也会自愈；投影缓存行是惰性的；
+附件是共享的内容寻址对象，**绝不能**碰。
 
-**3. A loaded Session is unremovable, and it is what broke the first real click.** The Host
-keeps every Session it has ever loaded for its whole lifetime — measured: six minutes of
-idle polling with `tools/watch-liveness.mjs` and the loaded set never changed. No
-plugin-reachable API unloads one (`ctx.sessions.enter()` throws for an id already in the
-store; the Client's release never reaches the Host), and deleting the log underneath it
-would produce a row that returns on the next refresh and cannot be opened, because
-`sessionQuery.listSessions()` is the union of the in-memory store and the persisted headers.
-Hence the deferred mode.
+**3. 被加载的会话无法移除，而它正是第一次真实点击失败的原因。** 宿主会把它曾经加载过的每个会话持有到进程结束
+—— 实测：用 `tools/watch-liveness.mjs` 空闲轮询 6 分钟，已加载集合从未变化。没有任何插件可及的 API 能卸载它
+（对已在存储里的 id，`ctx.sessions.enter()` 抛错；客户端的释放不会到达宿主），而硬删其日志会产生一行
+「下次刷新就回来、且点不开」的坏行，因为 `sessionQuery.listSessions()` 是内存存储与已持久化 header 的并集。
+这就是延后模式存在的原因。
 
-**4. The Host's own process has no `DSH_HOME`, and the Loader row has no evaluated config
-root.** `process.env.DSH_HOME` is undefined inside the Host (it is injected only into tool
-subprocesses), a `!!js dshHomePath('sessions')` row keeps an *unevaluated*
-`{"__jsExpr":"dshHomePath('sessions')"}` marker in `options.config`, and there is no
-`dshHomePath` global at runtime. Paths are therefore derived from the persistence layer's own
-`locate()` results, with each `dirname` hop spelled out in a named helper.
+**4. 宿主自己的进程里没有 `DSH_HOME`，Loader 行里也没有求值后的 config root。**
+`process.env.DSH_HOME` 在宿主内部是 undefined（它只注入工具子进程）；`!!js dshHomePath('sessions')` 行在
+`options.config` 里保留着**未求值**的 `{"__jsExpr":"dshHomePath('sessions')"}` 标记；运行时也不存在
+`dshHomePath` 全局。因此路径改为从持久化层自己的 `locate()` 结果推导，并且每一层 `dirname` 都写在具名辅助函数里。
 
-Also measured, and encoded in the installer: DSH's Loader does not re-evaluate a module for
-an entry id it already knows, and Node's ESM cache is keyed by URL — so a reinstall only
-takes effect in a running process when **both** the row id and the module URL carry a fresh
-revision. A consequence worth knowing when debugging: re-writing the same row does not
-re-run `apply`, so `tools/cycle.mjs` exists to force a genuinely new import.
+另外一条同样实测得到、并写进安装脚本的结论：DSH 的 Loader **不会**为一个它已认识的 entry id 重新求值模块，
+而 Node 的 ESM 缓存以 URL 为键 —— 所以要让改动在运行中的进程里生效，**行的 id 与模块 URL 都必须带新 revision**。
+调试时值得知道的一个推论：把同一行重写一遍**不会**重新执行 `apply`，`tools/cycle.mjs` 就是为此存在的。
 
-## Reproduce the verification
+## 复现验证
 
 ```powershell
-node tools/test-host.mjs      # host half: guards, staging, drain, real recursive delete
-node tools/test-client.mjs    # browser half: slots, inject faces, components, route call, copy
-node tools/verify-paths.mjs   # every stored session resolves to its own directory
-node tools/test-route.mjs     # live host: 401 / 403 / 403 / 200 + refusal codes
-node tools/e2e-forged-delete.mjs --template <id>            # real destructive run
-node tools/e2e-forged-delete.mjs --template <id> --staged    # deferred path
+node tools/test-host.mjs      # 宿主半：保护分支、登记、启动清账、真实递归删除
+node tools/test-client.mjs    # 浏览器半：插槽、inject 面、组件输出、路由调用、文案
+node tools/verify-paths.mjs   # 每个已存储会话都能解析到它自己的目录
+node tools/test-route.mjs     # 运行中的宿主：401 / 403 / 403 / 200 + 各拒绝码
+node tools/e2e-forged-delete.mjs --template <id>            # 真实破坏性测试
+node tools/e2e-forged-delete.mjs --template <id> --staged    # 延后路径
 ```
 
-### The destructive run, and its two traps
+### 破坏性测试，以及它的两个陷阱
 
-A Session created through `session/create` is **always live** (`agents.ensureSession`
-returns a live ordinary Agent), and the plugin deliberately refuses live Sessions — so the
-first attempt reports `archive-purge/session-live` and correctly deletes nothing. Calling
-`session/rename` "to validate the log" makes it live too, because opening a stored Session
-for write is what loads it. `tools/e2e-forged-delete.mjs` therefore manufactures a stored,
-non-live Session out of a legitimate log (only the header's `id` changes), validates it with
-`session/list` — the same header read `stat()` performs, and the only one the deletion path
-needs — and then has the plugin delete it for real:
+通过 `session/create` 创建的会话**必然是活的**（`agents.ensureSession` 只返回活的普通 Agent），
+而插件会（正确地）拒绝活会话 —— 所以第一次尝试返回 `archive-purge/session-live`，且什么都没删。
+若为了「校验日志」去调 `session/rename`，同样会把它变成活的，因为「以写入方式打开一个已存储会话」就是加载它。
+因此 `tools/e2e-forged-delete.mjs` 用一份合法日志制造出一个已存储、非活的会话（只改 header 里的 `id`），
+用 `session/list` 校验它 —— 这与删除路径所需的 `stat()` 是同一次 header 读取 —— 然后交给插件真删：
 
 ```
 ok  a stored log now exists under the new identity
@@ -251,24 +221,48 @@ ok  DSH no longer lists it
 ok  the archive set holds exactly what it did before
 ```
 
-The script aborts before any deletion if DSH does not list the manufactured Session, and its
-`finally` block removes the directory and clears the archive mark no matter what. Every
-pre-existing Session was verified intact afterwards (15/15 directories self-consistent, 5/5
-Workspace registrations unchanged).
+如果 DSH 没有列出被制造的会话，脚本会在任何删除动作之前中止；无论发生什么，它的 `finally` 都会清掉目录并
+撤销归档标记。事后核验所有既有会话完好（15/15 目录自洽，5/5 Workspace 注册未变）。
 
-Two protective refusals were also exercised on real data: a live Session, and an archived
-subagent Session (`archive-purge/subagent`, verified by archiving one and unarchiving it
-again — fully reversible).
+另外两条保护性拒绝也在真实数据上跑过：活会话，以及一个已归档的 subagent 会话
+（`archive-purge/subagent`，通过先归档再撤销归档验证 —— 完全可逆）。
 
-## Reverting
+## 发布到 npm
+
+这个包本身就是 DSH 的安装单位（`dsh.manifestVersion` + `dsh.bundle.patch`），所以一旦发布到 npm，
+任何人都能用一条命令装上，不需要检出仓库。发布方要准备的东西：
+
+1. **npm 账号**：https://www.npmjs.com/signup，并完成邮箱验证 —— 未登录无法发布
+   （本机检查：`npm whoami`）。
+2. **确认包名可用**：`npm view dsh-archive-purge`（发布前应为 404）。
+3. **登录**：`npm login`。建议开启 2FA；若改用 Automation / Granular Token，**不要把 token 贴进
+   聊天、issue 或日志**，只在本地用 `npm config set` 或环境变量注入。
+4. **在包根目录发布**（是 `plugin/`，不是仓库根）：
+
+   ```powershell
+   cd plugin
+   npm publish          # 未加 scope 的包首次发布即为 public
+   ```
+
+   `prepublishOnly` 会先跑两个离线套件（host + client）作为发布门禁；确需跳过用
+   `npm publish --ignore-scripts`（该门禁依赖同仓库的 `tools/`，从 tarball 或浅拷贝发布时会失败）。
+5. **核对**：`npm view dsh-archive-purge`、以及 https://www.npmjs.com/package/dsh-archive-purge
+6. **在 DSH 里真装一遍**：`dsh plugin --profile desktop add dsh-archive-purge`，再看 Plugins 页是否
+   出现「归档会话清理」。DSH 查包时先问 npm 官方源、再回退 npmmirror，所以刚发布也不受镜像同步延迟影响。
+
+版本号在 `plugin/package.json`；npm 不允许重复发布同一版本，任何后续改动都要先
+`npm version patch|minor` 再发。本包**刻意不声明 peer 依赖**（宿主半只用 `node:` 内置模块，客户端注入走
+DSH 的模块表），因此不会有「依赖不兼容」在安装前被拦下。
+
+## 回滚
 
 ```powershell
-# bundle shape: drop the bundle and its dependency
+# bundle 形态：移除组合包与依赖
 dsh plugin --profile desktop remove dsh-archive-purge
 
-# file-URL shape: removes the Loader row and $DSH_HOME/plugins/dsh-archive-purge
+# 文件 URL 形态：移除 Loader 行与 $DSH_HOME/plugins/dsh-archive-purge
 node install.mjs --uninstall
 ```
 
-A timestamped copy of `cordis.patch.yml` from before every install sits beside it
-(`cordis.patch.yml.bak-<timestamp>`), so any install can be undone from that file alone.
+每次安装前都会在 `cordis.patch.yml` 旁留一份带时间戳的副本（`cordis.patch.yml.bak-<timestamp>`），
+仅凭那份文件就能回滚任何一次安装。

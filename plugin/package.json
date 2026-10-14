@@ -23,10 +23,19 @@
     "lib/client.js",
     "cordis.patch.yml",
     "README.md",
+    "LICENSE",
     "locale"
   ],
   "engines": {
     "node": ">=22"
+  },
+  "scripts": {
+    "prepublishOnly": "node ../tools/test-host.mjs && node ../tools/test-client.mjs"
+  },
+  "author": "李文浩 (https://github.com/Angela-lwh)",
+  "homepage": "https://github.com/Angela-lwh/dsh-archive-purge#readme",
+  "bugs": {
+    "url": "https://github.com/Angela-lwh/dsh-archive-purge/issues"
   },
   "repository": {
     "type": "git",
