@@ -65,7 +65,9 @@ dsh plugin --profile <name> add file:<abs path to plugin/>
 The row has no `?rev=` query, so an already-imported Host module is only re-imported after a
 DSH restart; the browser half needs a page reload.
 
-The **file-URL Loader row** shape is what `install.mjs` writes, and it is still supported:
+The **file-URL Loader row** shape is what `install.mjs` writes, and it is still supported.
+These commands run in the repository checkout: `install.mjs` ships with the repository, not
+with this package, so an npm install has the bundle shape only.
 
 ```powershell
 # default profile is $env:DSH_PROFILE, else "desktop"
