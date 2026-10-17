@@ -2,7 +2,21 @@
 
 [English](README.en.md) | **中文**
 
-给 DeepSeek Harness 的已归档会话加一个「真正删除」按钮。DSH 能把会话归档，却从来没有删除能力。
+给 DeepSeek Harness 的**已归档会话**加一个「真正删除」按钮。DSH 能把会话归档，却从来没有删除能力。
+
+## 来源与形态
+
+| 项 | 值 |
+|---|---|
+| 公开仓库 | `https://github.com/Angela-lwh/dsh-archive-purge`（PUBLIC） |
+| 申报子路径 | `plugin/` |
+| 版本 / 许可 | `1.0.0` · MIT（见 `LICENSE`） |
+| 作者 | [Angela-lwh](https://github.com/Angela-lwh) |
+| 接入形态 | DSH **Profile Bundle**（`dsh.manifestVersion: 1`、`dsh.bundle.patch: ./cordis.patch.yml`），另含 Web 客户端半（`dsh.client.platform: web`） |
+| 宿主入口 | `plugin/index.js`（ESM；`export const name = 'archive-purge'`，`inject = ['connection','workspaceRegistry','sessionPersistence']`） |
+| 客户端入口 | `plugin/lib/client.js`（手写的 lazy-CJS 浏览器 bundle） |
+| 运行环境 | Node `>=22`；本机实测 DSH `0.2.1-rc.2` · desktop profile |
+| 依赖 | 无运行时依赖，无 lockfile |
 
 ## 插件如何工作
 
@@ -49,4 +63,29 @@ dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 dsh plugin --profile desktop remove dsh-archive-purge
 ```
 
-刷新页面（Ctrl+R）即可看到按钮，宿主侧不需要重启。
+**改动后如何生效**（实测行为）：
+
+- 浏览器半 `plugin/lib/client.js`：刷新页面即可 —— 宿主会重新快照该产物，页面随即抓取新的 bundle；
+- 宿主半 `plugin/index.js`：已导入的模块需要重启 DSH，或把该 bundle 关掉再打开以重新挂载。
+
+## 权限与副作用（如实声明）
+
+| 项 | 事实 |
+|---|---|
+| 文件系统 | 读取并**递归删除** `$DSH_HOME/sessions/<项目键>/<会话 id>/`；写入自有的 `$DSH_HOME/archive-purge/pending.json` |
+| DSH 持久状态 | 经 DSH 的 Workspace API 移除该会话的工作区归属与归档标记（`$DSH_HOME/storages/workspace.json`） |
+| 本地 HTTP | 在 DSH 已运行的 Web 服务上注册一个精确路由 `POST /api/archive-purge/deleteSession`，继承 DSH 自身的鉴权 |
+| 界面 | 向两个侧栏插槽注册菜单项与悬停按钮；删除后经 `api-session/removed` 事件通知界面丢弃该行 |
+| 网络 | **无**（`plugin/index.js` 只 import `node:` 内置模块） |
+| 子进程 / 安装脚本 | **无**；包内没有任何 install/postinstall 脚本 |
+| 外部副作用 | **不可逆地删除会话日志**，不进回收站 |
+
+## 状态与边界
+
+- 本仓库**未**经过 DSH Hub Workshop 审核、认证或兼容性验证，Registry 权限为 0。本页任何内容都
+  不构成「可安装」「安全」或「官方兼容」的结论。
+- **收录申请尚未创建**：`plugin/package.json` 缺少 `dshWorkshop` 声明，intake 会在读取阶段阻断；
+  作者补齐并推送新的固定 commit 之后才能提交申请。
+- 仓库里的测试与报告由作者自行编写和运行，不是独立的第三方门禁；结论以独立审核与测试为准。
+- 申请只使用公开、不可变的来源坐标与结构化清单，不含任何凭据、私有链接、个人绝对路径或本机配置。
+- 删除不可逆：请先在**可丢弃**的会话上验证。

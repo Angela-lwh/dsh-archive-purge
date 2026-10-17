@@ -2,8 +2,22 @@
 
 **English** | [中文](README.md)
 
-A real delete button for archived DeepSeek Harness sessions. DSH can archive a Session but has
-never been able to remove one.
+A real delete button for **archived** DeepSeek Harness sessions. DSH can archive a Session but
+has never been able to remove one.
+
+## Source and form
+
+| | |
+|---|---|
+| Public repository | `https://github.com/Angela-lwh/dsh-archive-purge` (PUBLIC) |
+| Submission subpath | `plugin/` |
+| Version / license | `1.0.0` · MIT (see `LICENSE`) |
+| Author | [Angela-lwh](https://github.com/Angela-lwh) |
+| Integration form | DSH **Profile Bundle** (`dsh.manifestVersion: 1`, `dsh.bundle.patch: ./cordis.patch.yml`) plus a Web client half (`dsh.client.platform: web`) |
+| Host entry | `plugin/index.js` (ESM; `export const name = 'archive-purge'`, `inject = ['connection','workspaceRegistry','sessionPersistence']`) |
+| Client entry | `plugin/lib/client.js` (hand-written lazy-CJS browser bundle) |
+| Runtime | Node `>=22`; measured on DSH `0.2.1-rc.2`, `desktop` profile |
+| Dependencies | none at runtime; no lockfile |
 
 ## How the plugin works
 
@@ -57,4 +71,34 @@ pending deletions** → **立即清理 / Clean up now**.
 dsh plugin --profile desktop remove dsh-archive-purge
 ```
 
-Reload the page (Ctrl+R) to see the buttons; no DSH restart is needed.
+**How a change takes effect** (measured behaviour):
+
+- browser half, `plugin/lib/client.js`: reload the page — the Host re-snapshots the artifact and
+  the page fetches the new bundle;
+- host half, `plugin/index.js`: an already-imported module is re-imported only after a DSH
+  restart, or by toggling this bundle off and on to remount it.
+
+## Permissions and side effects (declared as measured)
+
+| | |
+|---|---|
+| Filesystem | reads and **recursively deletes** `$DSH_HOME/sessions/<project key>/<session id>/`; writes its own `$DSH_HOME/archive-purge/pending.json` |
+| DSH durable state | removes the Session's Workspace membership and archive mark through DSH's Workspace API (`$DSH_HOME/storages/workspace.json`) |
+| Local HTTP | registers one exact route, `POST /api/archive-purge/deleteSession`, on the Web server DSH already runs, inheriting DSH's own authentication |
+| UI | registers a menu row and a hover button into two sidebar slots; after a deletion it announces `api-session/removed` so connected UIs drop the row |
+| Network | **none** (`plugin/index.js` imports only `node:` builtins) |
+| Subprocesses / install scripts | **none**; the package ships no install or postinstall script |
+| External effect | **irreversibly deletes Session logs**; there is no trash |
+
+## Status and boundaries
+
+- This repository has **not** been reviewed, certified or compatibility-verified by the DSH Hub
+  Workshop, and its Registry authority is 0. Nothing here constitutes a claim that the project
+  is installable, safe, or officially compatible.
+- **No submission has been created yet**: `plugin/package.json` does not declare `dshWorkshop`,
+  so intake blocks at the read stage; the author must add it and push a new pinned commit first.
+- The tests and reports in this repository are written and run by the author. They are not an
+  independent gate — conclusions rest on independent review and testing.
+- A submission uses only public, immutable source coordinates and a structured manifest; it
+  contains no credential, private link, personal absolute path or local configuration.
+- Deletion is irreversible: verify it on a **disposable** Session first.
