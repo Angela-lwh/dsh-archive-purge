@@ -59,5 +59,46 @@
       ]
     }
   },
+  "dshWorkshop": {
+    "schema": "omdsh-workshop-package/v1",
+    "type": "plugin",
+    "integration": {
+      "protocol": "harness-profile",
+      "artifact": "cordis.patch.yml"
+    },
+    "install": {
+      "mode": "transactional",
+      "adapter": "profile-bundle",
+      "failurePolicy": "generation-rollback",
+      "touchesCurrentBeforeActivation": false
+    },
+    "lifecycle": {
+      "activation": "restart-profile",
+      "dispose": "supported"
+    },
+    "permissions": [
+      "filesystem:write",
+      "storage:write",
+      "ui:extend",
+      "webserver:register"
+    ],
+    "compatibility": {
+      "dshVersions": [
+        "0.2.1-rc.2"
+      ]
+    },
+    "capability": {
+      "id": "archived-session-delete",
+      "kind": "service",
+      "invocation": "archive a throwaway Session, then call POST /api/archive-purge/deleteSession with its id and a browser-session cookie (the same route the row's \"...\" menu -> Delete session uses)",
+      "expected": "the reply reports deleted:true for that id, its directory under $DSH_HOME/sessions is gone, and the id no longer appears in $DSH_HOME/storages/workspace.json archivedSessionIds"
+    },
+    "evidence": {
+      "install": "plugin/README.md",
+      "failureIsolation": null,
+      "hotReload": "tools/cycle.mjs",
+      "remove": "plugin/README.md"
+    }
+  },
   "license": "MIT"
 }
