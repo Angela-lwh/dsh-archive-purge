@@ -94,10 +94,10 @@
       "expected": "the reply reports deleted:true for that id, its directory under $DSH_HOME/sessions is gone, and the id no longer appears in $DSH_HOME/storages/workspace.json archivedSessionIds"
     },
     "evidence": {
-      "install": "plugin/README.md",
+      "install": "README.md",
       "failureIsolation": null,
-      "hotReload": "tools/cycle.mjs",
-      "remove": "plugin/README.md"
+      "hotReload": "README.md",
+      "remove": "README.md"
     }
   },
   "license": "MIT"
