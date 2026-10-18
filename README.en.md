@@ -34,27 +34,34 @@ the projection cache. Deletion is irreversible — there is no trash.
 
 ## How to use it
 
-**Install** — replace `desktop` with the profile you are installing into. All three routes take the
-same DSH install path (profile dependency, `dsh.profile.bundles`, the profile's `node_modules`):
+**Install** — replace `desktop` with the profile you are installing into:
 
 ```powershell
-# 1. from the npm registry, once published — the shortest form
-dsh plugin --profile desktop add dsh-archive-purge
+# 1. paste the repository URL — in the Plugins page install box or on the command line
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 
-# 2. from a GitHub Release tarball — no npm account needed
+# 2. pinned to one commit, so the source cannot drift with main (recommended for others)
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<full 40-character commit>
+
+# 3. from the GitHub Release tarball — no npm account needed either
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.1/dsh-archive-purge-1.0.1.tgz
 
-# 3. from a local checkout — picks up your edits immediately
+# 4. from a local checkout — picks up your edits immediately
 dsh plugin --profile desktop add file:<absolute path to this repo>/plugin
 ```
 
-**Measured**: `file:` (a local directory or a local tarball) and `http(s):` (a tarball URL) both
-install cleanly through `dsh plugin add`; the npm route needs the package published first.
+All four write the profile dependency, add `dsh-archive-purge` to `dsh.profile.bundles`, and install
+into the profile's `node_modules`. **All four are measured**, including the row composing and the
+Plugins card reporting 1.0.1.
 
-> **Do not use `github:owner/repo#<sha>&path:/subdir`.** It looks like the direct route, but pnpm
-> derives the dependency alias from the spec — `dsh-archive-purge#<sha>`, which is not a valid
-> dependency name — and refuses to install it (`ERR_PNPM_INVALID_DEPENDENCY_NAME`). A git
-> dependency also triggers pnpm's build-approval flow. Distribute through npm or a Release tarball.
+The repository root is now a **real package**: the root `package.json` is a shim whose `main` and
+`dsh.bundle.patch` point into `plugin/`, which is what makes the repository URL installable.
+`tools/verify-package.mjs` checks that the shim and `plugin/package.json` agree on every shared field
+and that each declared path exists; it runs first in the publish gate.
+
+> **Still do not use `github:owner/repo#<sha>&path:/subdir`**: pnpm derives the dependency alias from
+> that spec (`dsh-archive-purge#<sha>`, not a valid dependency name) and refuses it with
+> `ERR_PNPM_INVALID_DEPENDENCY_NAME`. To pin a commit use form 2, the plain `#<commit>` suffix.
 
 **Use it**:
 

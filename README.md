@@ -29,27 +29,32 @@
 
 ## 怎么使用
 
-**安装**（把 `desktop` 换成你要装的 profile 名；三种方式都是同一条 DSH 安装路径）：
+**安装**（把 `desktop` 换成你的 profile 名）：
 
 ```powershell
-# ① 发布到 npm 之后 —— 最简
-dsh plugin --profile desktop add dsh-archive-purge
+# ① 直接填 GitHub 地址 —— 插件页的安装框或命令行都行
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 
-# ② 从 GitHub Release 的 tarball 安装 —— 不需要 npm 账号
+# ② 固定到某个 commit（来源不随 main 漂移，推荐给别人用）
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<40 位完整 commit>
+
+# ③ Release 的 tarball（同样不需要 npm 账号）
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.1/dsh-archive-purge-1.0.1.tgz
 
-# ③ 本机已有检出 —— 改完代码即时生效，适合自己开发
+# ④ 本机已有检出 —— 改完代码即时生效，适合自己开发
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 ```
 
-三种方式都会写入 profile 依赖、把 `dsh-archive-purge` 加进 `dsh.profile.bundles`，并装进 profile 的
-`node_modules`。**已实测**：`file:`（本地路径或本地 tarball）与 `http(s):`（tarball URL）在
-`dsh plugin add` 下都能干净安装；npm 路线需要先发布到注册表。
+四条路线都会写入 profile 依赖、把 `dsh-archive-purge` 加进 `dsh.profile.bundles`，并装进 profile 的
+`node_modules`。**①②③④ 全部实测通过**（含插件行正常组合、插件卡片显示 1.0.1）。
 
-> **不要用 `github:owner/repo#<sha>&path:/子目录` 这种写法。** 它看起来最直接，但 pnpm 会把依赖别名
-> 解析成 `dsh-archive-purge#<sha>` 这样的非法名字并拒绝安装
-> （`ERR_PNPM_INVALID_DEPENDENCY_NAME`），而且 git 依赖还会触发构建批准流程。远程分发请走 npm 或
-> Release tarball。
+仓库根目录是一个**真正的包**：根 `package.json` 是壳清单，`main` 与 `dsh.bundle.patch` 都指向
+`plugin/`，所以"填仓库地址"能装。`tools/verify-package.mjs` 会校验壳清单与 `plugin/package.json`
+在每个共享字段上一致、且各自声明的路径都存在（它在发布门禁里第一个跑）。
+
+> **仍然不要用 `github:owner/repo#<sha>&path:/子目录` 这种写法**：pnpm 会把依赖别名解析成
+> `dsh-archive-purge#<sha>` 这样的非法名字并拒绝（`ERR_PNPM_INVALID_DEPENDENCY_NAME`）。
+> 要指定 commit 用 ② 那种 `#<commit>` 即可。
 
 **使用**：
 

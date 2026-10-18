@@ -36,19 +36,25 @@ DSH 能把会话归档，却从来不能删除。它自己的文档说了两次�
 第二份拷贝、也不需要带 revision 的行：
 
 ```powershell
-# ① 发布到 npm 之后 —— 最简
-dsh plugin --profile desktop add dsh-archive-purge
+# ① 直接填 GitHub 地址 —— 插件页的安装框或命令行都行
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 
-# ② 从 GitHub Release 的 tarball 安装 —— 不需要 npm 账号、不需要检出仓库
+# ② 固定到某个 commit（来源不随 main 漂移）
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<40 位完整 commit>
+
+# ③ Release 的 tarball
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.1/dsh-archive-purge-1.0.1.tgz
 
-# ③ 本机已有检出；路径必须是绝对路径
+# ④ 本机已有检出；路径必须是绝对路径
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 ```
 
+① ② 之所以可用，是因为**仓库根目录也是一个真正的包**：根 `package.json` 是壳清单，`main` 指向
+`plugin/index.js`、`dsh.bundle.patch` 指向 `plugin/cordis.patch.yml` —— 而"填仓库地址"装的正是仓库根。
+`tools/verify-package.mjs` 保证壳清单与本包的共享字段、以及双方声明的路径都一致。
+
 > **`github:owner/repo#<sha>&path:/子目录` 这种写法不可用**：pnpm 会把依赖别名解析成
-> `dsh-archive-purge#<sha>` 并拒绝（`ERR_PNPM_INVALID_DEPENDENCY_NAME`），git 依赖还会触发构建批准。
-> 远程分发请用 npm 或 tarball（本仓库的 Release / 本地 `npm pack` 产物都行，实测可装）。
+> `dsh-archive-purge#<sha>` 并拒绝（`ERR_PNPM_INVALID_DEPENDENCY_NAME`）。要固定 commit 用上面的 ②。
 
 它会把这个依赖写进 profile 的 `package.json`、把 `dsh-archive-purge` 加进 profile 的
 `dsh.profile.bundles`，并把包装进 profile 的 `node_modules`。本包自身已声明为组合包
