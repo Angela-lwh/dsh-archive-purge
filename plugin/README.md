@@ -36,17 +36,29 @@ DSH 能把会话归档，却从来不能删除。它自己的文档说了两次�
 第二份拷贝、也不需要带 revision 的行：
 
 ```powershell
-# 从 npm 注册表安装 —— 不需要检出仓库
+# 一条命令，从公开仓库的固定 commit 安装 —— 不需要检出仓库、也不需要 npm 账号
+dsh plugin --profile desktop add "github:Angela-lwh/dsh-archive-purge#<40 位完整 commit>&path:/plugin"
+
+# 若已发布到 npm 注册表，则更短
 dsh plugin --profile desktop add dsh-archive-purge
 
 # 或者从本仓库的检出安装；路径必须是绝对路径
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 ```
 
+`&path:/plugin` 是必需的：本仓库根目录不是包，包在 `plugin/` 子目录里。`#` 后必须是完整的 40 位
+commit，不能是分支名或短 SHA，否则来源会漂移。
+
 它会把这个依赖写进 profile 的 `package.json`、把 `dsh-archive-purge` 加进 profile 的
 `dsh.profile.bundles`，并把包装进 profile 的 `node_modules`。本包自身已声明为组合包
 （见下方 `dsh.bundle.patch`），所以它的行随后会像其他组合包一样由 `cordis.patch.yml` 组合出来，
-插件也会出现在侧栏 **Plugins** 页上，标题与描述取自 `locale/<lang>.json`。
+插件也会出现在侧栏 **Plugins** 页上。
+
+> **卡片的标题与描述要求 `locale/` 出现在 `exports` 里。** app-boot 是按
+> `包名/locale/<语言>.json` 经 Node 解析器读取的，也就是走 `package.json#exports`；没有导出时它
+> 静默回退到 `package.json` 的 `name`/`description`（英文），卡片就只会显示英文。本包的
+> `exports` 显式导出了 `./locale/en.json` 与 `./locale/zh.json`。改动 `package.json` 或新增
+> `locale/` 之后要重新物化（删掉 `node_modules/<包名>` 再 `add`）并重挂该 bundle，元数据才会重新读取。
 
 这次物化是**安装那一刻冻结的硬链接农场**，不是指向本目录的活动窗口。实测：pnpm 硬链接过的文件
 能看到之后对源的**原地写入**；但源被"替换式改写"过的文件会一直保留旧字节；而安装之后**新增**

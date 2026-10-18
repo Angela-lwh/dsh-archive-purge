@@ -29,7 +29,16 @@
 
 ## 怎么使用
 
-**安装**（在仓库根目录执行；路径必须是绝对路径）：
+**安装（一条命令，不需要检出仓库、也不需要 npm 账号）**：
+
+```powershell
+dsh plugin --profile desktop add "github:Angela-lwh/dsh-archive-purge#<40 位完整 commit>&path:/plugin"
+```
+
+`#` 后面是 40 位 commit（固定来源，不会随分支漂移），`&path:/plugin` 指向仓库里的包目录 —— 整仓库不是包，
+包在 `plugin/` 子目录里。把 `desktop` 换成你要装的 profile 名即可。
+
+若本机已有仓库检出，也可以装本地路径（改完代码即时生效，适合自己开发）：
 
 ```powershell
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
@@ -40,6 +49,8 @@ dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 1. 把侧栏视图筛选切到 **仅显示已归档**；
 2. 悬停该行点**垃圾桶图标**，或打开它的 `...` 菜单选 **删除会话**；
 3. 确认。宿主能释放的会话当场删除、那一行立即消失；被登记的会话会在下次启动完成，弹窗会如实说明。
+
+装好后侧栏 **Plugins** 页会出现「**归档会话清理**」卡片（中英双语标题与描述，跟随 app 语言），可以开关。
 
 **手动完成被登记的删除**：任意会话行的 `...` 菜单 → **完成待删除清理** → **立即清理**。
 

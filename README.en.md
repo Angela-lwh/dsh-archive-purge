@@ -34,7 +34,17 @@ the projection cache. Deletion is irreversible — there is no trash.
 
 ## How to use it
 
-**Install** (from the repository root; the path must be absolute):
+**Install with one command** — no checkout and no npm account needed:
+
+```powershell
+dsh plugin --profile desktop add "github:Angela-lwh/dsh-archive-purge#<full 40-character commit>&path:/plugin"
+```
+
+The `#` pins the full commit (the source cannot drift with a branch) and `&path:/plugin` points at
+the package inside the repository — the repository root is not the package. Replace `desktop` with
+whichever profile you are installing into.
+
+With a local checkout you can install a path instead, which also picks up your edits immediately:
 
 ```powershell
 dsh plugin --profile desktop add file:<absolute path to this repo>/plugin
@@ -47,6 +57,9 @@ dsh plugin --profile desktop add file:<absolute path to this repo>/plugin
    **删除会话 / Delete session**;
 3. confirm. A Session the Host can release is deleted on the spot and its row disappears
    immediately; a staged one is finished at the next start, and the dialog says so.
+
+Once installed, the **Plugins** page shows a 「归档会话清理」 card with a bilingual title and
+description that follow the app locale, and the bundle can be switched off and on like any other.
 
 **Finish a staged deletion by hand**: any Session row's `...` menu → **完成待删除清理 / Finish
 pending deletions** → **立即清理 / Clean up now**.
