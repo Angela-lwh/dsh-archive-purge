@@ -1,0 +1,58 @@
+{
+  "name": "dsh-archive-purge",
+  "version": "1.0.1",
+  "private": false,
+  "description": "Delete action for archived DeepSeek Harness sessions: permanently removes the session log, its Workspace membership, and its archive mark.",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "session",
+    "archive",
+    "delete"
+  ],
+  "type": "module",
+  "main": "./plugin/index.js",
+  "exports": {
+    ".": "./plugin/index.js",
+    "./client": "./plugin/lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/en.json": "./plugin/locale/en.json",
+    "./locale/zh.json": "./plugin/locale/zh.json"
+  },
+  "files": [
+    "plugin",
+    "LICENSE",
+    "README.md",
+    "README.en.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "author": "李文浩 (https://github.com/Angela-lwh)",
+  "homepage": "https://github.com/Angela-lwh/dsh-archive-purge#readme",
+  "bugs": {
+    "url": "https://github.com/Angela-lwh/dsh-archive-purge/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Angela-lwh/dsh-archive-purge.git"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./plugin/cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
+  "license": "MIT"
+}

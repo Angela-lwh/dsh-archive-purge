@@ -33,7 +33,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "prepublishOnly": "node ../tools/test-host.mjs && node ../tools/test-client.mjs"
+    "prepublishOnly": "node ../tools/verify-package.mjs && node ../tools/test-host.mjs && node ../tools/test-client.mjs"
   },
   "author": "李文浩 (https://github.com/Angela-lwh)",
   "homepage": "https://github.com/Angela-lwh/dsh-archive-purge#readme",
