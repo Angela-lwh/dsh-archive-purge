@@ -43,7 +43,7 @@ dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<40 位完整 commit>
 
 # ③ Release 的 tarball
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.1/dsh-archive-purge-1.0.1.tgz
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.2/dsh-archive-purge-1.0.2.tgz
 
 # ④ 本机已有检出；路径必须是绝对路径
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin

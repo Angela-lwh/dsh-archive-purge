@@ -44,7 +44,7 @@ dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<full 40-character commit>
 
 # 3. from the GitHub Release tarball — no npm account needed either
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.1/dsh-archive-purge-1.0.1.tgz
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.2/dsh-archive-purge-1.0.2.tgz
 
 # 4. from a local checkout — picks up your edits immediately
 dsh plugin --profile desktop add file:<absolute path to this repo>/plugin
