@@ -42,7 +42,7 @@ same DSH install path (profile dependency, `dsh.profile.bundles`, the profile's 
 dsh plugin --profile desktop add dsh-archive-purge
 
 # 2. from a GitHub Release tarball — no npm account needed
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/<tag>/dsh-archive-purge-<version>.tgz
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.1/dsh-archive-purge-1.0.1.tgz
 
 # 3. from a local checkout — picks up your edits immediately
 dsh plugin --profile desktop add file:<absolute path to this repo>/plugin

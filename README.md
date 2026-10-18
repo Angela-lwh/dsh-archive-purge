@@ -36,7 +36,7 @@
 dsh plugin --profile desktop add dsh-archive-purge
 
 # ② 从 GitHub Release 的 tarball 安装 —— 不需要 npm 账号
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/<tag>/dsh-archive-purge-<版本>.tgz
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.1/dsh-archive-purge-1.0.1.tgz
 
 # ③ 本机已有检出 —— 改完代码即时生效，适合自己开发
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin

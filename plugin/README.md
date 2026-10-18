@@ -40,7 +40,7 @@ DSH 能把会话归档，却从来不能删除。它自己的文档说了两次�
 dsh plugin --profile desktop add dsh-archive-purge
 
 # ② 从 GitHub Release 的 tarball 安装 —— 不需要 npm 账号、不需要检出仓库
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/<tag>/dsh-archive-purge-<版本>.tgz
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.1/dsh-archive-purge-1.0.1.tgz
 
 # ③ 本机已有检出；路径必须是绝对路径
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
