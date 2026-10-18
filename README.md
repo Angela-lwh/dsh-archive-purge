@@ -29,20 +29,27 @@
 
 ## 怎么使用
 
-**安装（一条命令，不需要检出仓库、也不需要 npm 账号）**：
+**安装**（把 `desktop` 换成你要装的 profile 名；三种方式都是同一条 DSH 安装路径）：
 
 ```powershell
-dsh plugin --profile desktop add "github:Angela-lwh/dsh-archive-purge#<40 位完整 commit>&path:/plugin"
-```
+# ① 发布到 npm 之后 —— 最简
+dsh plugin --profile desktop add dsh-archive-purge
 
-`#` 后面是 40 位 commit（固定来源，不会随分支漂移），`&path:/plugin` 指向仓库里的包目录 —— 整仓库不是包，
-包在 `plugin/` 子目录里。把 `desktop` 换成你要装的 profile 名即可。
+# ② 从 GitHub Release 的 tarball 安装 —— 不需要 npm 账号
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/<tag>/dsh-archive-purge-<版本>.tgz
 
-若本机已有仓库检出，也可以装本地路径（改完代码即时生效，适合自己开发）：
-
-```powershell
+# ③ 本机已有检出 —— 改完代码即时生效，适合自己开发
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 ```
+
+三种方式都会写入 profile 依赖、把 `dsh-archive-purge` 加进 `dsh.profile.bundles`，并装进 profile 的
+`node_modules`。**已实测**：`file:`（本地路径或本地 tarball）与 `http(s):`（tarball URL）在
+`dsh plugin add` 下都能干净安装；npm 路线需要先发布到注册表。
+
+> **不要用 `github:owner/repo#<sha>&path:/子目录` 这种写法。** 它看起来最直接，但 pnpm 会把依赖别名
+> 解析成 `dsh-archive-purge#<sha>` 这样的非法名字并拒绝安装
+> （`ERR_PNPM_INVALID_DEPENDENCY_NAME`），而且 git 依赖还会触发构建批准流程。远程分发请走 npm 或
+> Release tarball。
 
 **使用**：
 

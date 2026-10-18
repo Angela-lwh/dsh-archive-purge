@@ -34,21 +34,27 @@ the projection cache. Deletion is irreversible — there is no trash.
 
 ## How to use it
 
-**Install with one command** — no checkout and no npm account needed:
+**Install** — replace `desktop` with the profile you are installing into. All three routes take the
+same DSH install path (profile dependency, `dsh.profile.bundles`, the profile's `node_modules`):
 
 ```powershell
-dsh plugin --profile desktop add "github:Angela-lwh/dsh-archive-purge#<full 40-character commit>&path:/plugin"
-```
+# 1. from the npm registry, once published — the shortest form
+dsh plugin --profile desktop add dsh-archive-purge
 
-The `#` pins the full commit (the source cannot drift with a branch) and `&path:/plugin` points at
-the package inside the repository — the repository root is not the package. Replace `desktop` with
-whichever profile you are installing into.
+# 2. from a GitHub Release tarball — no npm account needed
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/<tag>/dsh-archive-purge-<version>.tgz
 
-With a local checkout you can install a path instead, which also picks up your edits immediately:
-
-```powershell
+# 3. from a local checkout — picks up your edits immediately
 dsh plugin --profile desktop add file:<absolute path to this repo>/plugin
 ```
+
+**Measured**: `file:` (a local directory or a local tarball) and `http(s):` (a tarball URL) both
+install cleanly through `dsh plugin add`; the npm route needs the package published first.
+
+> **Do not use `github:owner/repo#<sha>&path:/subdir`.** It looks like the direct route, but pnpm
+> derives the dependency alias from the spec — `dsh-archive-purge#<sha>`, which is not a valid
+> dependency name — and refuses to install it (`ERR_PNPM_INVALID_DEPENDENCY_NAME`). A git
+> dependency also triggers pnpm's build-approval flow. Distribute through npm or a Release tarball.
 
 **Use it**:
 

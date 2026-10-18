@@ -36,18 +36,19 @@ DSH 能把会话归档，却从来不能删除。它自己的文档说了两次�
 第二份拷贝、也不需要带 revision 的行：
 
 ```powershell
-# 一条命令，从公开仓库的固定 commit 安装 —— 不需要检出仓库、也不需要 npm 账号
-dsh plugin --profile desktop add "github:Angela-lwh/dsh-archive-purge#<40 位完整 commit>&path:/plugin"
-
-# 若已发布到 npm 注册表，则更短
+# ① 发布到 npm 之后 —— 最简
 dsh plugin --profile desktop add dsh-archive-purge
 
-# 或者从本仓库的检出安装；路径必须是绝对路径
+# ② 从 GitHub Release 的 tarball 安装 —— 不需要 npm 账号、不需要检出仓库
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/<tag>/dsh-archive-purge-<版本>.tgz
+
+# ③ 本机已有检出；路径必须是绝对路径
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 ```
 
-`&path:/plugin` 是必需的：本仓库根目录不是包，包在 `plugin/` 子目录里。`#` 后必须是完整的 40 位
-commit，不能是分支名或短 SHA，否则来源会漂移。
+> **`github:owner/repo#<sha>&path:/子目录` 这种写法不可用**：pnpm 会把依赖别名解析成
+> `dsh-archive-purge#<sha>` 并拒绝（`ERR_PNPM_INVALID_DEPENDENCY_NAME`），git 依赖还会触发构建批准。
+> 远程分发请用 npm 或 tarball（本仓库的 Release / 本地 `npm pack` 产物都行，实测可装）。
 
 它会把这个依赖写进 profile 的 `package.json`、把 `dsh-archive-purge` 加进 profile 的
 `dsh.profile.bundles`，并把包装进 profile 的 `node_modules`。本包自身已声明为组合包
