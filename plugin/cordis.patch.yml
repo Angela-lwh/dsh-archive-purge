@@ -1,4 +1,4 @@
-# The dsh-archive-purge bundle patch: one row, applied over whatever layers came
+# The @anglea_lwh/dsh-archive-purge bundle patch: one row, applied over whatever layers came
 # before it. Installing this package as a profile bundle inserts the Host half;
 # the browser half needs no row of its own — `dsh-client-modules` finds it through
 # this package's `dsh.client` declaration and `exports["./client"]`.
@@ -10,4 +10,4 @@
 
 - insert:
     - id: archive-purge
-      name: dsh-archive-purge
+      name: "@anglea_lwh/dsh-archive-purge"

@@ -1,4 +1,4 @@
-# dsh-archive-purge
+# @anglea_lwh/dsh-archive-purge
 
 [English](README.en.md) | **中文**
 
@@ -36,27 +36,30 @@ DSH 能把会话归档，却从来不能删除。它自己的文档说了两次�
 第二份拷贝、也不需要带 revision 的行：
 
 ```powershell
-# ① 直接填 GitHub 地址 —— 插件页的安装框或命令行都行
+# ① 从 npm 安装 —— 最短。包名带 scope：npm 上 dsh-archive-purge 已被别人占用
+dsh plugin --profile desktop add @anglea_lwh/dsh-archive-purge
+
+# ② 直接填 GitHub 地址 —— 插件页的安装框或命令行都行
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 
-# ② 固定到某个 commit（来源不随 main 漂移）
+# ③ 固定到某个 commit（来源不随 main 漂移）
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<40 位完整 commit>
 
-# ③ Release 的 tarball
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.2/dsh-archive-purge-1.0.2.tgz
+# ④ Release 的 tarball
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.3/dsh-archive-purge-1.0.3.tgz
 
-# ④ 本机已有检出；路径必须是绝对路径
+# ⑤ 本机已有检出；路径必须是绝对路径
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 ```
 
-① ② 之所以可用，是因为**仓库根目录也是一个真正的包**：根 `package.json` 是壳清单，`main` 指向
+② 之所以可用，是因为**仓库根目录也是一个真正的包**：根 `package.json` 是壳清单，`main` 指向
 `plugin/index.js`、`dsh.bundle.patch` 指向 `plugin/cordis.patch.yml` —— 而"填仓库地址"装的正是仓库根。
 `tools/verify-package.mjs` 保证壳清单与本包的共享字段、以及双方声明的路径都一致。
 
 > **`github:owner/repo#<sha>&path:/子目录` 这种写法不可用**：pnpm 会把依赖别名解析成
-> `dsh-archive-purge#<sha>` 并拒绝（`ERR_PNPM_INVALID_DEPENDENCY_NAME`）。要固定 commit 用上面的 ②。
+> `<包名>#<sha>` 并拒绝（`ERR_PNPM_INVALID_DEPENDENCY_NAME`）。要固定 commit 用上面的 ③。
 
-它会把这个依赖写进 profile 的 `package.json`、把 `dsh-archive-purge` 加进 profile 的
+它会把这个依赖写进 profile 的 `package.json`、把 `@anglea_lwh/dsh-archive-purge` 加进 profile 的
 `dsh.profile.bundles`，并把包装进 profile 的 `node_modules`。本包自身已声明为组合包
 （见下方 `dsh.bundle.patch`），所以它的行随后会像其他组合包一样由 `cordis.patch.yml` 组合出来，
 插件也会出现在侧栏 **Plugins** 页上。
@@ -73,7 +76,7 @@ dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 （`Already up to date`）：
 
 ```powershell
-Remove-Item $env:DSH_HOME\profiles\<名字>\node_modules\dsh-archive-purge -Recurse -Force
+Remove-Item $env:DSH_HOME\profiles\<名字>\node_modules\@anglea_lwh\dsh-archive-purge -Recurse -Force
 dsh plugin --profile <名字> add file:<plugin/ 的绝对路径>
 ```
 
@@ -93,7 +96,7 @@ node install.mjs --uninstall        # 移除该行与拷贝过去的文件
 
 安装器做两件事，且刻意绕开 profile 的包管理器：
 
-1. 把本包拷贝到 `$DSH_HOME/plugins/dsh-archive-purge/`；
+1. 把本包拷贝到 `$DSH_HOME/plugins/dsh-archive-purge/`（安装目录名沿用包名，scope 只影响 npm 与 profile 依赖）；
 2. 往 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 写入一条标记包裹的 Loader 行，写之前先
    给该文件留一份带时间戳的备份。
 
@@ -267,7 +270,7 @@ Error: cannot get property "webServer" without inject
 
 ```yaml
 - id: archive-purge-<revision>
-  name: 'file:///…/dsh-archive-purge/index.js?rev=<revision>'
+  name: 'file:///…/dsh-archive-purge/index.js?rev=<revision>'  # 安装目录名
   config:
     releaseWaitMs: 5000
     releaseLoaded: false

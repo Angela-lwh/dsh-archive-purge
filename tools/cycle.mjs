@@ -19,9 +19,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const PACKAGE_NAME = 'dsh-archive-purge'
-const MARKER_START = '# >>> dsh-archive-purge (managed block) >>>'
-const MARKER_END = '# <<< dsh-archive-purge (managed block) <<<'
+const PACKAGE_NAME = '@anglea_lwh/dsh-archive-purge'
+const MARKER_START = '# >>> @anglea_lwh/dsh-archive-purge (managed block) >>>'
+const MARKER_END = '# <<< @anglea_lwh/dsh-archive-purge (managed block) <<<'
 
 
 const argv = process.argv.slice(2)

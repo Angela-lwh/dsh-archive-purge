@@ -37,31 +37,34 @@ the projection cache. Deletion is irreversible — there is no trash.
 **Install** — replace `desktop` with the profile you are installing into:
 
 ```powershell
-# 1. paste the repository URL — in the Plugins page install box or on the command line
+# 1. from the npm registry — the shortest form. The name is scoped, because the unscoped
+#    `dsh-archive-purge` on npm belongs to somebody else
+dsh plugin --profile desktop add @anglea_lwh/dsh-archive-purge
+
+# 2. paste the repository URL — in the Plugins page install box or on the command line
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 
-# 2. pinned to one commit, so the source cannot drift with main (recommended for others)
+# 3. pinned to one commit, so the source cannot drift with main (recommended for others)
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<full 40-character commit>
 
-# 3. from the GitHub Release tarball — no npm account needed either
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.2/dsh-archive-purge-1.0.2.tgz
+# 4. from the GitHub Release tarball
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.3/dsh-archive-purge-1.0.3.tgz
 
-# 4. from a local checkout — picks up your edits immediately
+# 5. from a local checkout — picks up your edits immediately
 dsh plugin --profile desktop add file:<absolute path to this repo>/plugin
 ```
 
-All four write the profile dependency, add `dsh-archive-purge` to `dsh.profile.bundles`, and install
-into the profile's `node_modules`. **All four are measured**, including the row composing and the
-Plugins card reporting 1.0.1.
+Each route writes the profile dependency, adds `@anglea_lwh/dsh-archive-purge` to
+`dsh.profile.bundles`, and installs into the profile's `node_modules`.
 
-The repository root is now a **real package**: the root `package.json` is a shim whose `main` and
+The repository root is a **real package**: the root `package.json` is a shim whose `main` and
 `dsh.bundle.patch` point into `plugin/`, which is what makes the repository URL installable.
 `tools/verify-package.mjs` checks that the shim and `plugin/package.json` agree on every shared field
 and that each declared path exists; it runs first in the publish gate.
 
 > **Still do not use `github:owner/repo#<sha>&path:/subdir`**: pnpm derives the dependency alias from
-> that spec (`dsh-archive-purge#<sha>`, not a valid dependency name) and refuses it with
-> `ERR_PNPM_INVALID_DEPENDENCY_NAME`. To pin a commit use form 2, the plain `#<commit>` suffix.
+> that spec (`<package-name>#<sha>`, not a valid dependency name) and refuses it with
+> `ERR_PNPM_INVALID_DEPENDENCY_NAME`. To pin a commit use form 3, the plain `#<commit>` suffix.
 
 **Use it**:
 
@@ -80,7 +83,7 @@ pending deletions** → **立即清理 / Clean up now**.
 **Uninstall**:
 
 ```powershell
-dsh plugin --profile desktop remove dsh-archive-purge
+dsh plugin --profile desktop remove @anglea_lwh/dsh-archive-purge
 ```
 
 **How a change takes effect** (measured behaviour):
