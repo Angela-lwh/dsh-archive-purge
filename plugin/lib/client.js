@@ -1,5 +1,5 @@
 /**
- * @anglea_lwh/dsh-archive-purge — browser half (hand-written lazy-CJS plugin bundle).
+ * @angela_lwh/dsh-archive-purge — browser half (hand-written lazy-CJS plugin bundle).
  *
  * Client bundles are plain artifacts: `dsh-client-modules` reads the file named
  * by `exports["./client"]` and serves it verbatim, so this file is what a build
@@ -22,7 +22,7 @@
  * plugin adds no polling and no second source of truth.
  */
 window.__ModuleLoader__.load({
-	id: '@anglea_lwh/dsh-archive-purge',
+	id: '@angela_lwh/dsh-archive-purge',
 	factory: (require) => {
 		const module = { exports: {} }
 		const exports = module.exports

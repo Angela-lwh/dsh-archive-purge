@@ -1,5 +1,5 @@
 /**
- * Install / uninstall @anglea_lwh/dsh-archive-purge for one dsh profile.
+ * Install / uninstall @angela_lwh/dsh-archive-purge for one dsh profile.
  *
  * The plugin needs two things: its files somewhere the Host can import, and one
  * Loader row. Both live outside the profile's package manager on purpose — a
@@ -26,9 +26,9 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const PACKAGE_NAME = '@anglea_lwh/dsh-archive-purge'
-const MARKER_START = '# >>> @anglea_lwh/dsh-archive-purge (managed block) >>>'
-const MARKER_END = '# <<< @anglea_lwh/dsh-archive-purge (managed block) <<<'
+const PACKAGE_NAME = '@angela_lwh/dsh-archive-purge'
+const MARKER_START = '# >>> @angela_lwh/dsh-archive-purge (managed block) >>>'
+const MARKER_END = '# <<< @angela_lwh/dsh-archive-purge (managed block) <<<'
 
 const argv = process.argv.slice(2)
 const dryRun = argv.includes('--dry-run')
@@ -74,7 +74,7 @@ async function installPlugin() {
   const revision = createHash('sha256').update(readFileSync(join(pluginDir, 'index.js'))).digest('hex').slice(0, 12)
   const block = [
     MARKER_START,
-    '# Managed by @anglea_lwh/dsh-archive-purge/install.mjs — edit the block above instead of this line.',
+    '# Managed by @angela_lwh/dsh-archive-purge/install.mjs — edit the block above instead of this line.',
     `# revision: ${revision}`,
     '- insert:',
     `    - id: archive-purge-${revision}`,
@@ -192,6 +192,6 @@ function readOption(flag) {
 
 /** Report a fatal usage or environment problem. */
 function fail(message) {
-  console.error(`@anglea_lwh/dsh-archive-purge install: ${message}`)
+  console.error(`@angela_lwh/dsh-archive-purge install: ${message}`)
   process.exit(1)
 }

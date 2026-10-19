@@ -1,4 +1,4 @@
-# @anglea_lwh/dsh-archive-purge
+# @angela_lwh/dsh-archive-purge
 
 [English](README.en.md) | **中文**
 
@@ -37,7 +37,7 @@ DSH 能把会话归档，却从来不能删除。它自己的文档说了两次�
 
 ```powershell
 # ① 从 npm 安装 —— 最短。包名带 scope：npm 上 dsh-archive-purge 已被别人占用
-dsh plugin --profile desktop add @anglea_lwh/dsh-archive-purge
+dsh plugin --profile desktop add @angela_lwh/dsh-archive-purge
 
 # ② 直接填 GitHub 地址 —— 插件页的安装框或命令行都行
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
@@ -59,7 +59,7 @@ dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 > **`github:owner/repo#<sha>&path:/子目录` 这种写法不可用**：pnpm 会把依赖别名解析成
 > `<包名>#<sha>` 并拒绝（`ERR_PNPM_INVALID_DEPENDENCY_NAME`）。要固定 commit 用上面的 ③。
 
-它会把这个依赖写进 profile 的 `package.json`、把 `@anglea_lwh/dsh-archive-purge` 加进 profile 的
+它会把这个依赖写进 profile 的 `package.json`、把 `@angela_lwh/dsh-archive-purge` 加进 profile 的
 `dsh.profile.bundles`，并把包装进 profile 的 `node_modules`。本包自身已声明为组合包
 （见下方 `dsh.bundle.patch`），所以它的行随后会像其他组合包一样由 `cordis.patch.yml` 组合出来，
 插件也会出现在侧栏 **Plugins** 页上。
@@ -76,7 +76,7 @@ dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 （`Already up to date`）：
 
 ```powershell
-Remove-Item $env:DSH_HOME\profiles\<名字>\node_modules\@anglea_lwh\dsh-archive-purge -Recurse -Force
+Remove-Item $env:DSH_HOME\profiles\<名字>\node_modules\@angela_lwh\dsh-archive-purge -Recurse -Force
 dsh plugin --profile <名字> add file:<plugin/ 的绝对路径>
 ```
 

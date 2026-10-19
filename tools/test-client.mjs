@@ -121,7 +121,7 @@ const require_ = (specifier) => {
 // Importing the bundle executes the registration facade, exactly as a `<script>` load does.
 await import(pathToFileURL(BUNDLE).href)
 assert.ok(registration !== undefined, 'the bundle must register itself with window.__ModuleLoader__')
-assert.equal(registration.id, '@anglea_lwh/dsh-archive-purge', 'the module id must equal the package name')
+assert.equal(registration.id, '@angela_lwh/dsh-archive-purge', 'the module id must equal the package name')
 assert.equal(typeof registration.factory, 'function')
 
 const exported = registration.factory(require_)

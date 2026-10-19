@@ -33,7 +33,7 @@
 
 ```powershell
 # ① 从 npm 安装 —— 最短。注意包名带 scope：npm 上 dsh-archive-purge 已被别人占用
-dsh plugin --profile desktop add @anglea_lwh/dsh-archive-purge
+dsh plugin --profile desktop add @angela_lwh/dsh-archive-purge
 
 # ② 直接填 GitHub 地址 —— 插件页的安装框或命令行都行
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
@@ -48,7 +48,7 @@ dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
 ```
 
-五种路线都会写入 profile 依赖、把 `@anglea_lwh/dsh-archive-purge` 加进 `dsh.profile.bundles`，并装进
+五种路线都会写入 profile 依赖、把 `@angela_lwh/dsh-archive-purge` 加进 `dsh.profile.bundles`，并装进
 profile 的 `node_modules`。
 
 仓库根目录是一个**真正的包**：根 `package.json` 是壳清单，`main` 与 `dsh.bundle.patch` 都指向
@@ -72,7 +72,7 @@ profile 的 `node_modules`。
 **卸载**：
 
 ```powershell
-dsh plugin --profile desktop remove @anglea_lwh/dsh-archive-purge
+dsh plugin --profile desktop remove @angela_lwh/dsh-archive-purge
 ```
 
 **改动后如何生效**（实测行为）：

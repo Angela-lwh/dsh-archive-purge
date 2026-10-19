@@ -1,5 +1,5 @@
 /**
- * @anglea_lwh/dsh-archive-purge — Host half.
+ * @angela_lwh/dsh-archive-purge — Host half.
  *
  * DeepSeek Harness can archive a Session but has never been able to delete one:
  * `dsh-session-persistence-jsonl`'s own README states "Nothing deletes session
@@ -35,7 +35,7 @@
  * deleted log. The reverse order would resurrect a browsable session whose log
  * no longer exists.
  *
- * @module @anglea_lwh/dsh-archive-purge
+ * @module @angela_lwh/dsh-archive-purge
  */
 import { readdir, rm, stat } from 'node:fs/promises'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'

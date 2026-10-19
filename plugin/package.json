@@ -1,5 +1,5 @@
 {
-  "name": "@anglea_lwh/dsh-archive-purge",
+  "name": "@angela_lwh/dsh-archive-purge",
   "version": "1.0.3",
   "private": false,
   "description": "Delete action for archived DeepSeek Harness sessions: permanently removes the session log, its Workspace membership, and its archive mark.",

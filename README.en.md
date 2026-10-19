@@ -39,7 +39,7 @@ the projection cache. Deletion is irreversible — there is no trash.
 ```powershell
 # 1. from the npm registry — the shortest form. The name is scoped, because the unscoped
 #    `dsh-archive-purge` on npm belongs to somebody else
-dsh plugin --profile desktop add @anglea_lwh/dsh-archive-purge
+dsh plugin --profile desktop add @angela_lwh/dsh-archive-purge
 
 # 2. paste the repository URL — in the Plugins page install box or on the command line
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
@@ -54,7 +54,7 @@ dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 dsh plugin --profile desktop add file:<absolute path to this repo>/plugin
 ```
 
-Each route writes the profile dependency, adds `@anglea_lwh/dsh-archive-purge` to
+Each route writes the profile dependency, adds `@angela_lwh/dsh-archive-purge` to
 `dsh.profile.bundles`, and installs into the profile's `node_modules`.
 
 The repository root is a **real package**: the root `package.json` is a shim whose `main` and
@@ -83,7 +83,7 @@ pending deletions** → **立即清理 / Clean up now**.
 **Uninstall**:
 
 ```powershell
-dsh plugin --profile desktop remove @anglea_lwh/dsh-archive-purge
+dsh plugin --profile desktop remove @angela_lwh/dsh-archive-purge
 ```
 
 **How a change takes effect** (measured behaviour):
