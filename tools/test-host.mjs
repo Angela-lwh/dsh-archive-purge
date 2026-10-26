@@ -44,8 +44,22 @@ function scenario() {
     unarchived: [],
     detached: [],
     archivedIds: [],
+    /** Session ids the Workspace registry pins. */
+    pinnedIds: [],
     workspaces: [],
     headers: {},
+    /** Session id -> the projection-cache values a checkpointed Session exposes. */
+    projections: {},
+    /** Session id -> its stored events, for the authoritative blank check. */
+    sessionEvents: {},
+    /** Session id -> stored artifact size in bytes; a real log by default. */
+    sizes: {},
+    /** Session ids whose logs the sweep actually read. */
+    loads: [],
+    /** Session ids with an open write handle: their stat has no physical size. */
+    pendingWrites: new Set(),
+    /** Root-scope event listeners the plugin registered, in order. */
+    listeners: [],
     /** Session ids the Host holds in its in-memory store. */
     loaded: new Set(),
     /** Session id -> Agent status, for ids the Host holds as live Agents. */
@@ -124,6 +138,9 @@ function ctxFor(world) {
       get archivedSessionIds() {
         return world.archivedIds
       },
+      get pinnedSessionIds() {
+        return world.pinnedIds
+      },
       list: () => world.workspaces,
       async unarchiveSession(sessionId) {
         world.unarchived.push(sessionId)
@@ -135,10 +152,13 @@ function ctxFor(world) {
       ...(world.useLocate === false ? {} : { locate: (header) => ({ kind: 'jsonl', path: world.locatePath(header) }) }),
       async stat(sessionId) {
         const header = world.headers[sessionId]
-        return header === undefined ? undefined : { header, revision: 'test', sizeBytes: 1 }
+        if (header === undefined) return undefined
+        // The real backend answers a pending write handle with a header and no size.
+        if (world.pendingWrites.has(sessionId)) return { header, revision: 'pending' }
+        return { header, revision: 'test', sizeBytes: world.sizes[sessionId] ?? 8192 }
       },
       async list() {
-        return Object.values(world.headers).map((header) => ({ header, revision: 'test', sizeBytes: 1 }))
+        return Object.values(world.headers).map((header) => ({ header, revision: 'test', sizeBytes: world.sizes[header.id] ?? 8192 }))
       },
     },
     get(service) {
@@ -151,8 +171,28 @@ function ctxFor(world) {
         }
       }
       if (service === 'agents') return { get: (id) => world.agents.get(id) }
+      if (service === 'sessionProjectionCache') {
+        return {
+          cachedSnapshot: (header) => {
+            const values = world.projections[header.id]
+            return values === undefined ? undefined : { values }
+          },
+        }
+      }
+      if (service === 'sessionQuery') {
+        return {
+          async load(sessionId) {
+            world.loads.push(sessionId)
+            return { header: world.headers[sessionId], events: world.sessionEvents[sessionId] ?? [] }
+          },
+        }
+      }
       if (service === 'loader') return { entries: () => [{ options: { name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: world.root } } }] }
       return undefined
+    },
+    on(event, listener) {
+      world.listeners.push({ event, listener })
+      return () => {}
     },
     emit: (event, sessionId) => world.events.push({ kind: 'emit', event, sessionId }),
     logger: { warn: (message) => world.warnings.push(String(message)) },
@@ -511,6 +551,210 @@ async function leftoverWorld() {
   const result = await world.request({ sessionId: 'session-missing' })
   assert.deepEqual(result.body, { ok: true, value: { sessionId: 'session-missing', deleted: false, reason: 'no-stored-log', descendants: [], orphansSwept: [] } })
   assert.deepEqual(world.unarchived, ['session-missing'], 'a ghost id is still retired')
+}
+
+// ---- blank placeholders: the sessions the sidebar hides but @ lists ------------
+
+/** One stored Session directory plus the metadata a blank placeholder carries. */
+async function seedBlank(world, projectSlug, sessionId, { createdAt = Date.now() - 60 * 60 * 1000, events = [{ type: 'sandbox/mode' }, { type: 'permissions' }], sizeBytes = 512 } = {}) {
+  world.headers[sessionId] = { id: sessionId, cwd: 'D:\\Project\\demo', createdAt }
+  world.projections[sessionId] = { sessionListMetadata: { blank: true } }
+  world.sessionEvents[sessionId] = events
+  world.sizes[sessionId] = sizeBytes
+  world.locatePath = (header) => join(world.root, projectSlug, header.id, 'session.v4.jsonl.zstd')
+  await mkdir(join(world.root, projectSlug, sessionId), { recursive: true })
+  await writeFile(join(world.root, projectSlug, sessionId, 'session.v4.jsonl.zstd'), 'seed\n')
+}
+
+{
+  // The placeholder never started a turn, is cold, older than the grace period, and
+  // its projection positively says blank — the product's own definition of "abandoned".
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-blank'
+  await seedBlank(world, projectSlug, sessionId)
+  launch(world, { sweepBlanks: false })
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 10 * 60 * 1000 })
+  assert.deepEqual(report.deleted, [sessionId], JSON.stringify(report))
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), false, 'the placeholder directory is gone')
+  assert.ok(world.unarchived.includes(sessionId), 'its durable bookkeeping is retired too')
+  assert.deepEqual(world.events, [{ kind: 'emit', event: 'api-session/removed', sessionId }],
+    'the GUI is told to drop it')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // Three reasons to keep one: a turn was committed (history, not a placeholder), a
+  // session the Host still holds may be open in a window, and a fresh one may be the
+  // conversation the user is starting right now.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  await seedBlank(world, projectSlug, 'session-had-turn', { events: [{ type: 'turn/start' }, { type: 'sandbox/mode' }] })
+  await seedBlank(world, projectSlug, 'session-held')
+  world.loaded.add('session-held')
+  await seedBlank(world, projectSlug, 'session-fresh', { createdAt: Date.now() })
+  await seedBlank(world, projectSlug, 'session-pinned')
+  world.pinnedIds = ['session-pinned']
+  launch(world, { sweepBlanks: false })
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 10 * 60 * 1000 })
+  assert.deepEqual(report.deleted, [], 'nothing is deletable here')
+  assert.deepEqual(report.skipped, [{ sessionId: 'session-had-turn', reason: 'it had a turn' }],
+    'only the log read can prove a turn, and that one proves it')
+  for (const id of ['session-had-turn', 'session-held', 'session-fresh', 'session-pinned']) {
+    assert.equal(existsSync(join(world.root, projectSlug, id)), true, `${id} must survive`)
+  }
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A Session the backend still holds a write handle for is not deletable: the file
+  // would only come back on the next append. Its stat carries no physical size.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-pending-write'
+  await seedBlank(world, projectSlug, sessionId)
+  world.pendingWrites.add(sessionId)
+  launch(world, { sweepBlanks: false })
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0 })
+  assert.deepEqual(report.skipped, [{ sessionId, reason: 'its write handle is still open' }])
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), true, 'the log survives an open handle')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A Host start collects them: the first lifecycle edge, and no timer anywhere.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-blank'
+  await seedBlank(world, projectSlug, sessionId)
+  launch(world)
+  await waitFor(() => !existsSync(join(world.root, projectSlug, sessionId)))
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), false, 'the startup pass removes it')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A placeholder no checkpoint has seen yet: the size gate admits it, the log read
+  // proves it, and it is collected. A real conversation with an uncheckpointed log is
+  // never opened at all — the size gate refuses it first.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const unchecked = 'session-uncheckpointed'
+  await seedBlank(world, projectSlug, unchecked, { sizeBytes: 512, events: [{ type: 'sandbox/mode' }, { type: 'permissions' }] })
+  delete world.projections[unchecked]
+  const real = 'session-real'
+  await seedBlank(world, projectSlug, real, { sizeBytes: 50_000, events: [] })
+  delete world.projections[real]
+  launch(world, { sweepBlanks: false })
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0 })
+  assert.deepEqual(report.deleted, [unchecked], JSON.stringify(report))
+  assert.deepEqual(report.skipped, [{ sessionId: real, reason: 'its log is too large to be a placeholder' }])
+  assert.deepEqual(world.loads, [unchecked], 'the large log is never read by the sweep')
+  assert.equal(existsSync(join(world.root, projectSlug, real)), true)
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A checkpoint that already saw a turn is decisive: the Session is not even a
+  // candidate, so the sweep cannot read or delete it.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-history'
+  await seedBlank(world, projectSlug, sessionId)
+  world.projections[sessionId] = { sessionListMetadata: { blank: false } }
+  launch(world, { sweepBlanks: false })
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0 })
+  assert.deepEqual(report, { examined: 0, deleted: [], skipped: [], failed: [] })
+  assert.deepEqual(world.loads, [], 'no log is read for a Session already known to have history')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // Starting a new conversation is the moment the previous untouched placeholder stops
+  // being the one about to be used, so the sweep runs on that event and not on a clock.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-blank'
+  // Fresh at activation, so the startup pass leaves it alone and cannot mask the event.
+  await seedBlank(world, projectSlug, sessionId, { createdAt: Date.now() })
+  launch(world)
+  const created = world.listeners.find((entry) => entry.event === 'session/created')
+  assert.ok(created !== undefined, 'the plugin must listen for session creation')
+  await new Promise((resolve) => {
+    setTimeout(resolve, 200)
+  })
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), true, 'too new for the startup pass')
+  // A minute later the same placeholder is behind the grace period; a new conversation
+  // is born, and that lifecycle edge is what collects it.
+  world.headers[sessionId].createdAt = Date.now() - 60 * 60 * 1000
+  created.listener({ id: sessionId })
+  await waitFor(() => !existsSync(join(world.root, projectSlug, sessionId)))
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), false, 'the event triggers the sweep')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // `sweepBlanks: false` is a hard stop for both the pass and the event wiring.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-blank'
+  await seedBlank(world, projectSlug, sessionId)
+  launch(world, { sweepBlanks: false })
+  assert.deepEqual(world.listeners, [], 'a disabled sweep registers no trigger')
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: false, blankMinAgeMs: 0 })
+  assert.deepEqual(report, { examined: 0, deleted: [], skipped: [], failed: [] })
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), true)
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The pending dialog names what it would collect, so a user never has to guess why
+  // the `@` list offers rows the sidebar does not show.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-blank'
+  await seedBlank(world, projectSlug, sessionId)
+  world.pendingFile = join(world.root, 'pending.json')
+  writeFileSync(world.pendingFile, JSON.stringify({ version: 1, sessionIds: [] }), 'utf8')
+  launch(world, { sweepBlanks: false })
+
+  const off = await world.request({ action: 'listPending' })
+  assert.deepEqual(off.body.value.blankSessionIds, [], 'a disabled sweep advertises nothing')
+
+  const on = await __test.listPendingPurge(ctxFor(world), {
+    sweepBlanks: true,
+    blankMinAgeMs: 0,
+    pendingFile: world.pendingFile,
+  })
+  assert.deepEqual(on.blankSessionIds, [sessionId], 'the preview names the placeholder without deleting it')
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), true, 'reading must not delete')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  world.pendingFile = join(world.root, 'pending.json')
+  writeFileSync(world.pendingFile, JSON.stringify({ version: 1, sessionIds: [] }), 'utf8')
+  launch(world, { sweepBlanks: false })
+  const retried = await world.request({ action: 'retryPending' })
+  assert.deepEqual(retried.body.value.blanks, { examined: 0, deleted: [], skipped: [], failed: [] },
+    'the cleanup pass always carries a blank-session report')
+  await rm(world.root, { recursive: true, force: true })
 }
 
 // ---- target verification -------------------------------------------------------

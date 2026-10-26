@@ -58,7 +58,7 @@ export const name = 'archive-purge'
  * empty store and the deferred purge looks idle, and a misread lineage either
  * strands a subagent log or deletes a fork).
  */
-export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents }
+export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents, blankCandidates, sweepBlankSessions }
 /**
  * Hard service requirements. An array (not the older `{required, optional}`
  * object shape, which the vendored Cordis reads as services literally named
@@ -132,6 +132,27 @@ const DEFAULT_PENDING_FILE = 'archive-purge/pending.json'
 /** Pending-store format, so a future change can migrate instead of misreading. */
 const PENDING_VERSION = 1
 /**
+ * The list-metadata projection's key. `blank` there means "no `turn/start` was
+ * ever committed" — the product's own definition of an untouched Session — and it
+ * is the cheap prefilter before the authoritative log read.
+ */
+const BLANK_PROJECTION = 'sessionListMetadata'
+/**
+ * How long a blank Session must have existed before it is collectable. A freshly
+ * created one may still be the conversation the user is opening, so the sweep
+ * only takes what has demonstrably been abandoned.
+ */
+const DEFAULT_BLANK_MIN_AGE_MS = 10 * 60 * 1000
+/**
+ * How large a log may be before it is assumed to hold a conversation. It is only a
+ * cost gate for Sessions no checkpoint can answer for: a placeholder written at
+ * entity birth is a few hundred bytes, so anything bigger is left alone rather than
+ * read. A Session this gate admits is still only deleted when its log proves it.
+ */
+const BLANK_LOG_LIMIT_BYTES = 4096
+/** What this key is *not*: a scheduled task. The sweep runs on lifecycle events only. */
+const BLANK_TRIGGER_EVENTS = ['session/created', 'session/disposed']
+/**
  * Refusals that can never become a purge, so a staged entry carrying one is dropped
  * instead of retried on every start. Everything else — including an unknown failure —
  * stays staged, because losing a deferred purge is worse than retrying it.
@@ -149,7 +170,7 @@ const PERMANENT_REFUSALS = new Set([
 /**
  * Register the deletion route, then finish any purge the previous Host could not.
  * @param ctx - Host plugin context carrying Connection, the Workspace registry, and persistence.
- * @param config - optional `{ sessionsRoot, releaseWaitMs, pendingFile, stageWhenLoaded, releaseLoaded, sweepOrphans }` overrides.
+ * @param config - optional `{ sessionsRoot, releaseWaitMs, pendingFile, stageWhenLoaded, releaseLoaded, sweepOrphans, sweepBlanks, blankMinAgeMs }` overrides.
  */
 export function apply(ctx, config = {}) {
   const settings = {
@@ -159,6 +180,8 @@ export function apply(ctx, config = {}) {
     stageWhenLoaded: config?.stageWhenLoaded !== false,
     releaseLoaded: config?.releaseLoaded !== false,
     sweepOrphans: config?.sweepOrphans !== false,
+    sweepBlanks: config?.sweepBlanks !== false,
+    blankMinAgeMs: readNonNegativeMs(config?.blankMinAgeMs, DEFAULT_BLANK_MIN_AGE_MS),
   }
   ctx.connection.fetch.register({
     path: ROUTE_PATH,
@@ -166,6 +189,7 @@ export function apply(ctx, config = {}) {
     requestBody: 'buffered',
     fetch: (request) => handleDeleteRequest(ctx, settings, request),
   })
+  watchBlankSessions(ctx, settings)
   scheduleStagedPurges(ctx, settings)
 }
 
@@ -353,6 +377,9 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
   // Leftovers from deletions this plugin performed before it cascaded: their parent
   // is already gone, so nothing can ever browse or open them again.
   const swept = await sweepOrphanSubagents(ctx, settings, signal)
+  // Abandoned blank placeholders are collected on the same occasion, so a deletion
+  // leaves the store as tidy as it found it.
+  await sweepBlankSessions(ctx, settings, signal)
   return {
     sessionId,
     deleted: true,
@@ -711,6 +738,174 @@ async function sweepOrphanSubagents(ctx, settings, signal) {
 }
 
 /**
+ * What the projection cache remembers about a header's blankness, without reading
+ * a log. `true` means the last checkpoint saw no `turn/start`; `undefined` means
+ * the cache cannot answer (an uncheckpointed Session, a version mismatch, or no
+ * cache service at all) and the caller must not guess.
+ *
+ * @param projections - `ctx.sessionProjectionCache`, when present.
+ * @param header - the stored Session header.
+ * @returns `true`, `false`, or `undefined` when unknown.
+ */
+function cachedBlank(projections, header) {
+  try {
+    const snapshot = projections?.cachedSnapshot?.(header, [BLANK_PROJECTION])
+    const value = snapshot?.values?.[BLANK_PROJECTION]
+    return typeof value?.blank === 'boolean' ? value.blank : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether the Workspace registry pins this Session; a pinned row is never swept. */
+function isPinned(registry, sessionId) {
+  const pinned = registry?.pinnedSessionIds
+  return Array.isArray(pinned) && pinned.includes(sessionId)
+}
+
+/**
+ * Blank Sessions the sweep may collect, filtered by everything that can be decided
+ * without reading a log: subagent origin, work in progress, the Host's hold, a pin,
+ * the minimum age, and what the projection cache can say. A cached `false` is
+ * decisive (history), a cached `true` needs only the log confirmation, and an
+ * unknown one is kept as a candidate so the caller can gate it on the log size.
+ *
+ * @param index - the Session index, when one could be listed.
+ * @param projections - `ctx.sessionProjectionCache`, when present.
+ * @param sessions - `ctx.sessions`, when present.
+ * @param agents - `ctx.agents`, when present.
+ * @param registry - `ctx.workspaceRegistry`.
+ * @param options - `{ minAgeMs, now }`.
+ * @returns the candidates, with their headers and whether a checkpoint vouched for them.
+ */
+function blankCandidates(index, projections, sessions, agents, registry, options) {
+  if (index === undefined) return []
+  const candidates = []
+  for (const [sessionId, header] of index.byId) {
+    if (header?.origin === 'subagent') continue
+    if (agents?.get?.(sessionId)?.status === 'running') continue
+    // A Session the Host holds may be open in a window, so it is never a candidate.
+    if (isLoaded(sessions, agents, sessionId)) continue
+    if (isPinned(registry, sessionId)) continue
+    const createdAt = typeof header.createdAt === 'number' ? header.createdAt : undefined
+    if (options.minAgeMs > 0 && (createdAt === undefined || options.now - createdAt < options.minAgeMs)) continue
+    const cached = cachedBlank(projections, header)
+    if (cached === false) continue
+    if (options.confirmedOnly === true && cached !== true) continue
+    candidates.push({ sessionId, header, cached: cached === true })
+  }
+  return candidates
+}
+
+/**
+ * Delete blank Sessions: placeholders created for a conversation that was never
+ * engaged, which the sidebar hides and the `@` reference completion still lists.
+ *
+ * Nothing about them is guesswork. A candidate must be cold (a Session open in any
+ * window is loaded), older than `blankMinAgeMs`, unpinned, positively blank in the
+ * projection cache, and its log must prove it: one `turn/start` anywhere and it is
+ * history, not a placeholder. The directory then passes the same guard as a normal
+ * purge. Anything else is skipped, never forced.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param signal - caller cancellation.
+ * @returns what was examined, deleted, skipped, and failed.
+ */
+async function sweepBlankSessions(ctx, settings, signal) {
+  const report = { examined: 0, deleted: [], skipped: [], failed: [] }
+  if (settings.sweepBlanks !== true) return report
+  const index = await collectSessionIndex(ctx)
+  const query = ctx.get('sessionQuery')
+  // Without the read service the plugin cannot prove "no turn ever started", so it
+  // does nothing rather than deleting on a cache hint alone.
+  if (index === undefined || typeof query?.load !== 'function') return report
+  const persistence = ctx.sessionPersistence
+  const candidates = blankCandidates(index, ctx.get('sessionProjectionCache'), ctx.get('sessions'), ctx.get('agents'), ctx.workspaceRegistry, {
+    minAgeMs: settings.blankMinAgeMs,
+    now: Date.now(),
+  })
+  report.examined = candidates.length
+  for (const { sessionId, header, cached } of candidates) {
+    signal?.throwIfAborted()
+    try {
+      const snapshot = await persistence.stat(sessionId, { signal })
+      if (snapshot === undefined) {
+        report.skipped.push({ sessionId, reason: 'no stored log' })
+        continue
+      }
+      // A snapshot without a physical size comes from the backend's pending-write
+      // tracker: a handle is still open and dropping the file now would only make it
+      // re-materialize on the next append.
+      if (typeof snapshot.sizeBytes !== 'number') {
+        report.skipped.push({ sessionId, reason: 'its write handle is still open' })
+        continue
+      }
+      // Nothing vouched for this one, so it is read only when the log is small enough
+      // to be a birth placeholder; a real conversation is never opened for the sweep.
+      if (!cached && (snapshot.sizeBytes ?? Number.POSITIVE_INFINITY) > BLANK_LOG_LIMIT_BYTES) {
+        report.skipped.push({ sessionId, reason: 'its log is too large to be a placeholder' })
+        continue
+      }
+      const loaded = await query.load(sessionId, signal)
+      if (loaded.events.some((event) => event.type === 'turn/start')) {
+        report.skipped.push({ sessionId, reason: 'it had a turn' })
+        continue
+      }
+      const directory = await resolveSessionDirectory(ctx, settings, persistence, snapshot.header ?? header)
+      await assertPurgeTarget(directory, sessionId)
+      await rm(directory, { recursive: true, force: true, maxRetries: 3 })
+      await retireMetadata(ctx, ctx.workspaceRegistry, sessionId)
+      ctx.emit('api-session/removed', sessionId)
+      report.deleted.push(sessionId)
+    } catch (error) {
+      report.failed.push({ sessionId, code: error?.code ?? 'archive-purge/failed', message: messageOf(error) })
+    }
+  }
+  if (report.deleted.length > 0) {
+    ctx.logger?.info?.(`archive-purge: removed ${String(report.deleted.length)} blank session placeholder(s)`)
+  }
+  return report
+}
+
+/**
+ * Collect blank placeholders whenever a Session is born or leaves the store.
+ *
+ * These are lifecycle edges, not a schedule: starting a new conversation is the
+ * moment the previous untouched placeholder stops being the one the user is about
+ * to use, and a disposal is the moment a Session can no longer be open anywhere.
+ * Bursts collapse into one pass, and nothing runs off a timer.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ */
+function watchBlankSessions(ctx, settings) {
+  if (settings.sweepBlanks !== true || typeof ctx.on !== 'function') return
+  let running = false
+  let dirty = false
+  const run = () => {
+    if (running) {
+      dirty = true
+      return
+    }
+    running = true
+    Promise.resolve()
+      .then(() => sweepBlankSessions(ctx, settings, undefined))
+      .catch((error) => {
+        ctx.logger?.warn?.(`archive-purge: blank-session sweep failed: ${messageOf(error)}`)
+      })
+      .finally(() => {
+        running = false
+        if (dirty) {
+          dirty = false
+          run()
+        }
+      })
+  }
+  for (const event of BLANK_TRIGGER_EVENTS) ctx.on(event, () => run())
+}
+
+/**
  * Record one Session whose purge has to wait for the next Host start.
  *
  * The archive mark is deliberately left in place: it is both the authorization for
@@ -771,6 +966,11 @@ function scheduleStagedPurges(ctx, settings) {
         await sweepOrphanSubagents(ctx, settings, undefined)
       } catch (error) {
         ctx.logger?.warn?.(`archive-purge: leftover subagent sweep failed: ${messageOf(error)}`)
+      }
+      try {
+        await sweepBlankSessions(ctx, settings, undefined)
+      } catch (error) {
+        ctx.logger?.warn?.(`archive-purge: blank-session sweep failed: ${messageOf(error)}`)
       }
     })
     .catch((error) => {
@@ -852,7 +1052,21 @@ async function listPendingPurge(ctx, settings) {
     throw new PurgeError('archive-purge/no-pending-store', 'no Harness home could be resolved, so there is no deferred-purge store to read')
   }
   const index = await collectSessionIndex(ctx)
-  return { pendingFile: path, sessionIds: readPending(path), orphanSubagentIds: orphanSubagentIds(index) }
+  const blanks = settings.sweepBlanks === true
+    ? blankCandidates(index, ctx.get('sessionProjectionCache'), ctx.get('sessions'), ctx.get('agents'), ctx.workspaceRegistry, {
+      minAgeMs: settings.blankMinAgeMs,
+      now: Date.now(),
+      // The dialog promises only what a checkpoint already vouches for; the pass itself
+      // also takes uncheckpointed small logs, and reports those when it runs.
+      confirmedOnly: true,
+    })
+    : []
+  return {
+    pendingFile: path,
+    sessionIds: readPending(path),
+    orphanSubagentIds: orphanSubagentIds(index),
+    blankSessionIds: blanks.map((candidate) => candidate.sessionId),
+  }
 }
 
 /**
@@ -875,7 +1089,13 @@ async function retryPendingPurge(ctx, settings, signal) {
   const sessions = ctx.get('sessions')
   const agents = ctx.get('agents')
   const orphans = await sweepOrphanSubagents(ctx, settings, signal)
-  return { ...report, stillLoaded: report.remaining.filter((sessionId) => isLoaded(sessions, agents, sessionId)), orphans }
+  const blanks = await sweepBlankSessions(ctx, settings, signal)
+  return {
+    ...report,
+    stillLoaded: report.remaining.filter((sessionId) => isLoaded(sessions, agents, sessionId)),
+    orphans,
+    blanks,
+  }
 }
 
 /**
@@ -1188,7 +1408,12 @@ function readOptionalPath(value) {
 
 /** A non-negative wait budget in milliseconds, or the default. */
 function readWaitBudget(value) {
-  return Number.isSafeInteger(value) && value >= 0 ? value : DEFAULT_RELEASE_WAIT_MS
+  return readNonNegativeMs(value, DEFAULT_RELEASE_WAIT_MS)
+}
+
+/** A non-negative millisecond budget, or the fallback for a missing/invalid value. */
+function readNonNegativeMs(value, fallback) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback
 }
 
 /**
