@@ -46,7 +46,7 @@ dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<40 位完整 commit>
 
 # ④ Release 的 tarball
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.3/dsh-archive-purge-1.0.3.tgz
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.4/dsh-archive-purge-1.0.4.tgz
 
 # ⑤ 本机已有检出；路径必须是绝对路径
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
@@ -142,19 +142,32 @@ node tools/cycle.mjs --variant x  # 在热 profile 上强制一次全新导入
 
 针对一个已归档的会话 id，按此顺序：
 
-1. 拒绝**正在干活**的会话（`ctx.agents.get(id).status === 'running'`）；
+1. 拒绝**正在干活**的会话（`ctx.agents.get(id).status === 'running'`），以及任何**正在干活的
+   子代理后代**（`archive-purge/descendant-running`）；
 2. 拒绝未归档的会话 —— 那个标记就是删除的授权；
 3. 定位会话目录：优先用 JSONL 后端自己的 `locate(meta)`，否则按
    `<root>/<projectKey(cwd)>/<encodeSegment(id)>/` 重新推导；两种方式都对照过本机每一个真实会话
    （`node tools/verify-paths.mjs`）；
 4. 拒绝这样的目标：末段不是编码后的 id、父目录不是 project-key 目录、或其中没有任何
    `session*.jsonl*` 世代；
-5. **短暂等待宿主释放**一个已加载的会话（默认 2 秒，`releaseWaitMs`）；若它仍被加载，则**把清理
-   登记到下次启动**，而不是直接拒绝 —— 见下一节；
-6. 递归删除该目录 —— 会话的各个日志世代与任何迁移暂存文件，也就是全部；
-7. 剪掉持久层里的工作区归属（`Workspace.detachSession`）与归档标记
-   （`workspaceRegistry.unarchiveSession`），然后发出白名单内的 `api-session/removed` 事件，
-   让每个已连上的 GUI 无需刷新就丢掉那一行。
+5. 找出**它启动过的子代理会话**（沿 `parentSession` 经 `origin: "subagent"` 的 header 传递，
+   不含 fork），并在动任何一个字节之前校验好每个子目录；
+6. **短暂等待宿主释放**一个已加载的会话（默认 2 秒，`releaseWaitMs`），子代理后代同理；若仍有
+   被加载的，则**把清理登记到下次启动**，而不是直接拒绝 —— 见下一节；
+7. 递归删除这些目录 —— 每个会话的各个日志世代与任何迁移暂存文件，也就是全部；
+8. 剪掉持久层里的工作区归属（`Workspace.detachSession`）与归档标记
+   （`workspaceRegistry.unarchiveSession`），然后为**每一个**被删会话发出白名单内的
+   `api-session/removed` 事件，让每个已连上的 GUI 无需刷新就丢掉那一行。
+
+**为什么要级联**：子代理是一个独立的会话 —— 它有自己的日志目录，`sessionQuery.listSessions()`
+会像列任何其它会话一样列出它，而侧边栏对所有 `origin: "subagent"` 的行一律不显示。于是
+「只删父会话」的结果是：那一行从侧边栏消失了，但子代理会话仍在，`@` 引用补全照样把它们摆出来 ——
+被删掉的对话还能从它的子代理里读出来。
+
+**遗留清理**：历史上被这样漏掉的子代理会话（父会话已不存在）会在三个时机被扫掉：宿主启动、
+任何一次成功删除之后、以及「完成待删除清理」那一遍。判定很窄：`origin: "subagent"`、父会话在
+列表与一次直接 `stat` 中都查不到、不在运行、未被宿主持有，并且目录同样通过上面的守卫。
+`cordis.patch.yml` 里可用 `sweepOrphans: false` 关闭。
 
 **先删字节、后改元数据**是刻意的：如果文件已经没了而某次持久写入失败，结果是一个不可见的陈旧 id
 （渲染会跳过没有 summary 的成员），而不是一行指向已不存在日志的可见记录。
@@ -215,11 +228,12 @@ POST /api/archive-purge/deleteSession  { sessionId }
 
 ```
 POST /api/archive-purge/deleteSession  { action:"listPending" }
-→ { ok:true, value:{ pendingFile:"…/pending.json", sessionIds:[…] } }
+→ { ok:true, value:{ pendingFile:"…/pending.json", sessionIds:[…], orphanSubagentIds:[…] } }
 
 POST /api/archive-purge/deleteSession  { action:"retryPending" }
 → { ok:true, value:{ attempted:2, deleted:1, dropped:0, stillStaged:1,
-                     remaining:[…], stillLoaded:[…], results:[…] } }
+                     remaining:[…], stillLoaded:[…], results:[…],
+                     orphans:{ examined:1, deleted:[…], skipped:[…], failed:[…] } } }
 ```
 
 `action` 默认为 `"delete"`，所以原先的请求体形状照旧可用。重试跑的就是下次启动会跑的那一遍：
@@ -228,6 +242,8 @@ POST /api/archive-purge/deleteSession  { action:"retryPending" }
 不会因为重试而变得可删** —— 重试只是去掉了*重启*。
 
 两个调用方共用同一份实现（`drainStagedPurges`）：启动那一遍记录报告，重试则把它返回。
+`listPending` 还会报出遗留的子代理会话（`orphanSubagentIds`），`retryPending` 在跑完登记之后再
+扫一遍它们，结果放在 `orphans` 里 —— 于是同一张对话框既完成延后删除，也清掉历史漏网的那部分。
 
 `$DSH_HOME` 刻意**不**从环境变量读取来定位那个文件：桌面宿主不把它导出给自己的进程，`!!js
 dshHomePath('storages')` 的 Loader 行保留着**未求值的** `{"__jsExpr":"dshHomePath('storages')"}`
@@ -266,6 +282,7 @@ Error: cannot get property "webServer" without inject
 | `releaseWaitMs` | `2000` | 在由我们自己释放之前，等宿主释放一个已加载会话的时长 |
 | `releaseLoaded` | `true` | 释放已归档且空闲的会话，让删除当场完成，而不是登记延后 |
 | `stageWhenLoaded` | `true` | 把已加载会话的清理登记到下次启动，而不是直接拒绝 |
+| `sweepOrphans` | `true` | 顺手清掉「父会话已不存在」的子代理会话残留 |
 | `pendingFile` | `$DSH_HOME/archive-purge/pending.json` | 登记的清理等待之处 |
 
 ```yaml

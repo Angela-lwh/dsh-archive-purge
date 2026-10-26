@@ -133,21 +133,37 @@ a cookie the Host issues itself instead; the Host half can log one from
 
 For one archived Session id, in this order:
 
-1. refuses a Session with **work in progress** (`ctx.agents.get(id).status === 'running'`);
+1. refuses a Session with **work in progress** (`ctx.agents.get(id).status === 'running'`),
+   and any **subagent descendant with work in progress** (`archive-purge/descendant-running`);
 2. refuses a Session that is not archived — that mark authorizes the deletion;
 3. locates the Session directory — preferring the JSONL backend's own `locate(meta)` and
    otherwise re-deriving `<root>/<projectKey(cwd)>/<encodeSegment(id)>/`, verified against
    every real Session on this machine (`node tools/verify-paths.mjs`);
 4. refuses a target whose last segment is not the encoded id, whose parent is not a
    project-key directory, or that holds no `session*.jsonl*` generation;
-5. **waits briefly for the Host to release a loaded Session** (default 2 s,
-   `releaseWaitMs`) and, if it is still loaded, **stages the purge for the next start**
-   instead of refusing outright — see the next section;
-6. recursively deletes that directory — the Session's log generations and any migration
+5. collects the **subagent Sessions it spawned** — following `parentSession` through
+   `origin: "subagent"` headers, never a fork — and verifies every child directory before a
+   single byte is removed;
+6. **waits briefly for the Host to release a loaded Session** (default 2 s,
+   `releaseWaitMs`), the descendant children included, and, if one is still loaded, **stages
+   the purge for the next start** instead of refusing outright — see the next section;
+7. recursively deletes those directories — each Session's log generations and any migration
    staging files, i.e. all of it;
-7. prunes the durable Workspace membership (`Workspace.detachSession`) and the archive mark
-   (`workspaceRegistry.unarchiveSession`), then emits the allowlisted
-   `api-session/removed` event so every connected GUI drops the row without a reload.
+8. prunes the durable Workspace membership (`Workspace.detachSession`) and the archive mark
+   (`workspaceRegistry.unarchiveSession`) of every removed Session, then emits the allowlisted
+   `api-session/removed` event for each so every connected GUI drops the rows without a reload.
+
+**Why the cascade**: a subagent is a Session of its own — its own log directory,
+`sessionQuery.listSessions()` lists it like any other, and the sidebar hides every
+`origin: "subagent"` row unconditionally. Deleting only the parent therefore removed the row
+from the sidebar while the child stayed behind, and the `@` reference completion kept offering
+the deleted conversation through it.
+
+**Leftovers**: subagent Sessions stranded by an earlier, non-cascading deletion (their parent
+is gone) are swept at three moments — a Host start, after any successful deletion, and the
+“Finish pending deletions” pass. The predicate is narrow: `origin: "subagent"`, the parent
+absent from both the listing and a direct `stat`, not running, not held by the Host, and the
+directory must pass the same guard. `sweepOrphans: false` in `cordis.patch.yml` turns it off.
 
 **Bytes first, metadata second** is deliberate: if a durable write fails after the files
 are gone, the result is an invisible stale id — rendering skips members without a summary —
@@ -216,11 +232,12 @@ and the row menu offers them as **完成待删除清理 / Finish pending deletio
 
 ```
 POST /api/archive-purge/deleteSession  { action:"listPending" }
-→ { ok:true, value:{ pendingFile:"…/pending.json", sessionIds:[…] } }
+→ { ok:true, value:{ pendingFile:"…/pending.json", sessionIds:[…], orphanSubagentIds:[…] } }
 
 POST /api/archive-purge/deleteSession  { action:"retryPending" }
 → { ok:true, value:{ attempted:2, deleted:1, dropped:0, stillStaged:1,
-                     remaining:[…], stillLoaded:[…], results:[…] } }
+                     remaining:[…], stillLoaded:[…], results:[…],
+                     orphans:{ examined:1, deleted:[…], skipped:[…], failed:[…] } } }
 ```
 
 `action` defaults to `"delete"`, so the original body shape keeps working. The retry runs
@@ -231,7 +248,10 @@ rather than being deleted or silently dropped. Nothing that was previously refus
 deletable — the retry only removes the *restart*.
 
 The one implementation is shared by both callers (`drainStagedPurges`): the startup pass logs
-its report, the retry returns it.
+its report, the retry returns it. `listPending` also reports the leftover subagent Sessions
+(`orphanSubagentIds`), and `retryPending` sweeps them after the staged pass and returns that
+report as `orphans` — so the same dialog both finishes deferred deletions and clears what
+earlier deletions missed.
 
 `$DSH_HOME` is deliberately **not** read from the environment to find that file: the desktop
 Host does not export it to its own process, the Loader row keeps an *unevaluated*
@@ -276,6 +296,7 @@ entry's phase.
 | `releaseWaitMs` | `2000` | how long to wait for the Host to release a loaded Session before releasing it ourselves |
 | `releaseLoaded` | `true` | release an archived idle Session so the deletion completes now, instead of staging it |
 | `stageWhenLoaded` | `true` | stage a loaded Session's purge for the next start instead of refusing |
+| `sweepOrphans` | `true` | also remove subagent Sessions whose parent conversation is already gone |
 | `pendingFile` | `$DSH_HOME/archive-purge/pending.json` | where staged purges wait |
 
 ```yaml

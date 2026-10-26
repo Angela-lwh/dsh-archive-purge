@@ -12,3 +12,7 @@ tools/out-*.json
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# DSH per-project state. The memory plugin writes `.dsh/` next to the workspace on its
+# own; this repository keeps no memory files and never commits them.
+.dsh/

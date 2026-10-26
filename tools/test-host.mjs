@@ -7,8 +7,10 @@
  * temporary session root, then drives every branch: malformed bodies, live
  * session, unarchived session, missing target, a target that is not a session
  * directory, a target outside the project-key layout, the `locate()` fast path,
- * the documented-layout fallback, and a successful purge that must remove the log
- * and retire the metadata.
+ * the documented-layout fallback, a successful purge that must remove the log
+ * and retire the metadata, the cascade onto a conversation's subagent Sessions
+ * (including a running or still-loaded child, and a fork that must survive), and
+ * the sweep of subagent leftovers whose parent is already gone.
  *
  * Everything happens under a fresh `dsh-archive-purge-test-*` directory inside the
  * OS temporary area; no real session is read or written.
@@ -25,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const HOST = join(HERE, '..', 'plugin', 'index.js')
 
-const { name, inject, apply } = await import(pathToFileURL(HOST).href)
+const { name, inject, apply, __test } = await import(pathToFileURL(HOST).href)
 assert.equal(name, 'archive-purge')
 assert.deepEqual(inject, ['connection', 'workspaceRegistry', 'sessionPersistence'],
   'the Host half must declare the three services it cannot work without')
@@ -159,9 +161,14 @@ function ctxFor(world) {
 
 /** A Workspace entity whose stored membership can be pruned. */
 function workspaceFor(world, sessionId) {
+  return workspaceWith(world, [sessionId])
+}
+
+/** A Workspace entity accounting for several Sessions, as the real one does. */
+function workspaceWith(world, sessionIds) {
   return {
-    sessionIds: [sessionId],
-    record: { sessionIds: [sessionId] },
+    sessionIds: [...sessionIds],
+    record: { sessionIds: [...sessionIds] },
     async detachSession(id) {
       world.detached.push(id)
       this.record.sessionIds = this.record.sessionIds.filter((entry) => entry !== id)
@@ -271,7 +278,7 @@ function workspaceFor(world, sessionId) {
   world.loaded.add('session-ghost')
   launch(world, { releaseWaitMs: 0 })
   const result = await world.request({ sessionId: 'session-ghost' })
-  assert.deepEqual(result.body, { ok: true, value: { sessionId: 'session-ghost', deleted: false, reason: 'already-purged' } })
+  assert.deepEqual(result.body, { ok: true, value: { sessionId: 'session-ghost', deleted: false, reason: 'already-purged', descendants: [], orphansSwept: [] } })
   assert.deepEqual(world.unarchived, [], 'the mark stays so the row stays hidden')
 }
 
@@ -304,12 +311,205 @@ function workspaceFor(world, sessionId) {
   assert.equal(result.body.error.code, 'archive-purge/subagent')
 }
 
+// ---- a purge cascades onto the conversation's subagent Sessions ----------------
+
+/** One project directory with a stored log generation inside every named Session. */
+async function seedSessions(root, projectSlug, headers) {
+  for (const id of Object.keys(headers)) {
+    const directory = join(root, projectSlug, id)
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'session.v4.jsonl.zstd'), 'seed\n')
+  }
+}
+
+{
+  // A subagent Session is a Session of its own: the sidebar hides every
+  // `origin: "subagent"` row, but `sessionQuery.listSessions()` still lists it, so
+  // the `@` reference completion kept offering a deleted conversation's
+  // transcripts until the purge took the children with the parent.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cascade-'))
+  const projectSlug = '--D-Project-demo--'
+  const parentId = 'session-parent'
+  const childId = 'session-child'
+  const siblingId = 'session-sibling'
+  const grandchildId = 'session-grandchild'
+  const forkId = 'session-fork'
+  const headers = {
+    [parentId]: { id: parentId, cwd: 'D:\\Project\\demo' },
+    [childId]: { id: childId, cwd: 'D:\\Project\\demo', origin: 'subagent', parentSession: parentId },
+    [siblingId]: { id: siblingId, cwd: 'D:\\Project\\demo', origin: 'subagent', parentSession: parentId },
+    [grandchildId]: { id: grandchildId, cwd: 'D:\\Project\\demo', origin: 'subagent', parentSession: childId },
+    // A fork shares a parent id but is an independent conversation: it must survive.
+    [forkId]: { id: forkId, cwd: 'D:\\Project\\demo', parentSession: parentId },
+  }
+  world.headers = headers
+  world.archivedIds = [parentId]
+  world.locatePath = (header) => join(world.root, projectSlug, header.id, 'session.v4.jsonl.zstd')
+  await seedSessions(world.root, projectSlug, headers)
+  world.workspaces = [workspaceWith(world, [parentId, childId])]
+  launch(world)
+
+  const result = await world.request({ sessionId: parentId })
+  assert.equal(result.body.ok, true, JSON.stringify(result.body))
+  assert.deepEqual(result.body.value.descendants, [childId, siblingId, grandchildId],
+    'every subagent descendant is removed with its conversation, grandchildren included')
+  for (const id of [parentId, childId, siblingId, grandchildId]) {
+    assert.equal(!existsSync(join(world.root, projectSlug, id)), true, `${id} must be gone`)
+  }
+  assert.equal(existsSync(join(world.root, projectSlug, forkId)), true, 'a fork is not subagent lineage')
+  assert.deepEqual(world.events.map((entry) => entry.sessionId), [parentId, childId, siblingId, grandchildId],
+    'every removed Session is published so the GUI can drop it without a reload')
+  assert.deepEqual(world.detached, [parentId, childId], 'membership of every removed Session is pruned')
+  assert.deepEqual(world.unarchived, [parentId, childId, siblingId, grandchildId],
+    'every archive mark is cleared, so no ghost stays behind')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // Work in progress inside a child blocks the whole conversation: the child's
+  // transcript is being written, and its history is the parent's history.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cascade-'))
+  const projectSlug = '--D-Project-demo--'
+  const parentId = 'session-parent'
+  const childId = 'session-child'
+  const headers = {
+    [parentId]: { id: parentId, cwd: 'D:\\Project\\demo' },
+    [childId]: { id: childId, cwd: 'D:\\Project\\demo', origin: 'subagent', parentSession: parentId },
+  }
+  world.headers = headers
+  world.archivedIds = [parentId]
+  world.agents.set(childId, { status: 'running' })
+  world.locatePath = (header) => join(world.root, projectSlug, header.id, 'session.v4.jsonl.zstd')
+  await seedSessions(world.root, projectSlug, headers)
+  launch(world, { releaseWaitMs: 0 })
+
+  const result = await world.request({ sessionId: parentId })
+  assert.equal(result.body.error.code, 'archive-purge/descendant-running')
+  assert.equal(result.body.error.message.includes(childId), true, 'the refusal names the busy child')
+  assert.equal(existsSync(join(world.root, projectSlug, parentId)), true, 'nothing is deleted')
+  assert.equal(existsSync(join(world.root, projectSlug, childId)), true)
+  assert.deepEqual(world.events, [], 'a refusal publishes nothing')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A child the Host still holds cannot be removed now, so the whole purge is
+  // staged rather than deleting the parent and stranding the child.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cascade-'))
+  const projectSlug = '--D-Project-demo--'
+  const parentId = 'session-parent'
+  const childId = 'session-child'
+  const headers = {
+    [parentId]: { id: parentId, cwd: 'D:\\Project\\demo' },
+    [childId]: { id: childId, cwd: 'D:\\Project\\demo', origin: 'subagent', parentSession: parentId },
+  }
+  world.headers = headers
+  world.archivedIds = [parentId]
+  world.loaded.add(childId)
+  world.locatePath = (header) => join(world.root, projectSlug, header.id, 'session.v4.jsonl.zstd')
+  await seedSessions(world.root, projectSlug, headers)
+  world.pendingFile = join(world.root, 'pending.json')
+  launch(world, { releaseWaitMs: 0 })
+
+  const result = await world.request({ sessionId: parentId })
+  assert.equal(result.body.error.code, 'archive-purge/session-deferred')
+  assert.deepEqual(stagedIds(world), [parentId], 'the parent is staged; the children follow when it runs')
+  assert.equal(existsSync(join(world.root, projectSlug, parentId)), true)
+  assert.equal(existsSync(join(world.root, projectSlug, childId)), true)
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A leftover subagent whose parent is already gone is deletable on its own.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-orphan-'))
+  const projectSlug = '--D-Project-demo--'
+  const orphanId = 'session-orphan'
+  world.headers = { [orphanId]: { id: orphanId, cwd: 'D:\\Project\\demo', origin: 'subagent', parentSession: 'session-gone' } }
+  world.archivedIds = [orphanId]
+  world.locatePath = (header) => join(world.root, projectSlug, header.id, 'session.v4.jsonl.zstd')
+  await seedSessions(world.root, projectSlug, world.headers)
+  launch(world, { sweepOrphans: false })
+
+  const result = await world.request({ sessionId: orphanId })
+  assert.equal(result.body.ok, true, JSON.stringify(result.body))
+  assert.equal(result.body.value.deleted, true, 'no dangling catalog can be left behind')
+  assert.equal(!existsSync(join(world.root, projectSlug, orphanId)), true)
+  await rm(world.root, { recursive: true, force: true })
+}
+
+// ---- leftovers from earlier deletions are reported and swept -------------------
+
+/** A world holding one orphan subagent and one subagent whose parent still exists. */
+async function leftoverWorld() {
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-leftover-'))
+  const projectSlug = '--D-Project-demo--'
+  const parentId = 'session-parent'
+  const orphanId = 'session-orphan'
+  const keptId = 'session-kept'
+  world.headers = {
+    [parentId]: { id: parentId, cwd: 'D:\\Project\\demo' },
+    [orphanId]: { id: orphanId, cwd: 'D:\\Project\\demo', origin: 'subagent', parentSession: 'session-gone' },
+    [keptId]: { id: keptId, cwd: 'D:\\Project\\demo', origin: 'subagent', parentSession: parentId },
+  }
+  world.locatePath = (header) => join(world.root, projectSlug, header.id, 'session.v4.jsonl.zstd')
+  await seedSessions(world.root, projectSlug, world.headers)
+  world.pendingFile = join(world.root, 'pending.json')
+  return { world, projectSlug, orphanId, keptId }
+}
+
+{
+  const { world, projectSlug, orphanId, keptId } = await leftoverWorld()
+  launch(world, { sweepOrphans: false })
+  const listed = await world.request({ action: 'listPending' })
+  assert.equal(listed.body.ok, true, JSON.stringify(listed.body))
+  assert.deepEqual(listed.body.value.orphanSubagentIds, [orphanId],
+    'the pending read also names the leftovers the sidebar cannot show')
+  assert.equal(existsSync(join(world.root, projectSlug, orphanId)), true, 'reading must not delete')
+  assert.equal(existsSync(join(world.root, projectSlug, keptId)), true)
+
+  const sweep = await __test.sweepOrphanSubagents(ctxFor(world), { sweepOrphans: true })
+  assert.deepEqual(sweep.deleted, [orphanId], 'only the parentless child is swept')
+  assert.equal(!existsSync(join(world.root, projectSlug, orphanId)), true)
+  assert.equal(existsSync(join(world.root, projectSlug, keptId)), true, 'a child of a live conversation survives')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A Host start sweeps them without being asked: nothing in the product can ever
+  // show an orphan again, and `@` must stop offering a deleted conversation.
+  const { world, projectSlug, orphanId, keptId } = await leftoverWorld()
+  launch(world)
+  await waitFor(() => !existsSync(join(world.root, projectSlug, orphanId)))
+  assert.equal(!existsSync(join(world.root, projectSlug, orphanId)), true, 'the startup pass removes it')
+  assert.equal(existsSync(join(world.root, projectSlug, keptId)), true)
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The on-demand cleanup pass reports the sweep beside the staged entries.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-nosweep-'))
+  world.pendingFile = join(world.root, 'pending.json')
+  writeFileSync(world.pendingFile, JSON.stringify({ version: 1, sessionIds: [] }), 'utf8')
+  launch(world, { sweepOrphans: false })
+  const retried = await world.request({ action: 'retryPending' })
+  assert.equal(retried.body.ok, true, JSON.stringify(retried.body))
+  assert.deepEqual(retried.body.value.orphans, { examined: 0, deleted: [], skipped: [], failed: [] },
+    'the pass always carries a sweep report, even when sweeping is configured off')
+  await rm(world.root, { recursive: true, force: true })
+}
+
 {
   const world = scenario()
   world.archivedIds = ['session-missing']
   launch(world)
   const result = await world.request({ sessionId: 'session-missing' })
-  assert.deepEqual(result.body, { ok: true, value: { sessionId: 'session-missing', deleted: false, reason: 'no-stored-log' } })
+  assert.deepEqual(result.body, { ok: true, value: { sessionId: 'session-missing', deleted: false, reason: 'no-stored-log', descendants: [], orphansSwept: [] } })
   assert.deepEqual(world.unarchived, ['session-missing'], 'a ghost id is still retired')
 }
 

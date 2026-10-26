@@ -286,7 +286,7 @@ await assert.rejects(
 const zh = dictionaries.get('archivePurge')?.zh
 const en = dictionaries.get('archivePurge')?.en
 assert.ok(zh !== undefined && en !== undefined, 'both dictionaries must be registered')
-for (const key of ['failed.loaded', 'failed.running', 'failed.notArchived', 'failed.subagent', 'failed.guard']) {
+for (const key of ['failed.loaded', 'failed.running', 'failed.descendantRunning', 'failed.notArchived', 'failed.subagent', 'failed.guard']) {
   assert.equal(typeof zh[key], 'string', `zh must define ${key}`)
   assert.equal(typeof en[key], 'string', `en must define ${key}`)
 }
@@ -303,6 +303,12 @@ assert.ok(!exported.describeFailure(loaded, tZh).includes('5000ms'), 'the raw Ho
 
 const running = Object.assign(new Error('has work in progress'), { code: 'archive-purge/session-running' })
 assert.match(exported.describeFailure(running, tZh), /正在进行/u)
+
+const descendantRunning = Object.assign(new Error('subagent session child has work in progress'), {
+  code: 'archive-purge/descendant-running',
+})
+assert.match(exported.describeFailure(descendantRunning, tZh), /子代理会话仍在工作/u,
+  'a busy child gets its own explanation rather than the parent-session one')
 
 const unknown = Object.assign(new Error('boom'), { code: 'archive-purge/added-later' })
 assert.match(exported.describeFailure(unknown, tZh), /archive-purge\/added-later: boom/u,
@@ -371,7 +377,7 @@ assert.equal(pendingElement.props.request.seq, 1)
 assert.equal(pendingElement.props.t, t)
 
 // The pending screen's own copy, and the code a missing store reports.
-for (const key of ['pending.title', 'pending.lead', 'pending.count', 'pending.none', 'pending.retry', 'pending.still', 'menu.retryPending']) {
+for (const key of ['pending.title', 'pending.lead', 'pending.count', 'pending.orphans', 'pending.orphansDone', 'pending.none', 'pending.retry', 'pending.still', 'menu.retryPending']) {
   assert.equal(typeof zh[key], 'string', `zh must define ${key}`)
   assert.equal(typeof en[key], 'string', `en must define ${key}`)
 }

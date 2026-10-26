@@ -137,7 +137,13 @@ if (firstProbe.body?.ok === true) {
 // ---- 4. a protective refusal on REAL pre-existing data, fully reversible -------
 
 const catalog = await remote('session/list', { _request: {} })
-const subagent = (catalog.value?.items ?? []).find((item) => item.origin === 'subagent' && item.agentAvailable === false)
+const catalogItems = catalog.value?.items ?? []
+const listedIds = new Set(catalogItems.map((item) => item.sessionId))
+// Only a child whose parent still exists is the guarded case: a subagent Session whose
+// parent is gone is a leftover the plugin now deletes, and this script never deletes a
+// Session it did not create.
+const subagent = catalogItems.find((item) => item.origin === 'subagent' && item.agentAvailable === false
+  && item.parentSessionId !== undefined && listedIds.has(item.parentSessionId))
 if (subagent === undefined) {
   console.log('\nno cold subagent Session to test the subagent guard; skipped')
 } else {

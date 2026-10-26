@@ -61,7 +61,7 @@ window.__ModuleLoader__.load({
 			'menu.deleteSession': 'Delete session',
 			'actions.delete': 'Delete',
 			'confirm.title': 'Permanently delete this session?',
-			'confirm.desc': '\u201c{title}\u201d and its stored log will be removed from disk. This cannot be undone.',
+			'confirm.desc': '\u201c{title}\u201d, its stored log, and any subagent sessions it started will be removed from disk. This cannot be undone.',
 			'confirm.pending': 'Deleting\u2026',
 			'confirm.action': 'Delete permanently',
 			'cancel': 'Cancel',
@@ -72,15 +72,19 @@ window.__ModuleLoader__.load({
 			'failed.loaded':
 				'This session is still loaded by DeepSeek Harness, usually because it was just open. Its history is untouched. Deleting works once the Host has released it, which happens after a restart.',
 			'failed.running': 'This session has work in progress. Stop it first, then delete.',
+			'failed.descendantRunning':
+				'A subagent session started by this conversation is still working. Stop it first, then delete.',
 			'failed.notArchived': 'Only an archived session can be deleted. Archive it first.',
-			'failed.subagent': 'This session was produced by a subagent and cannot be deleted.',
+			'failed.subagent': 'This session was produced by a subagent of a conversation that still exists, so it cannot be deleted on its own. Delete its parent conversation instead.',
 			'failed.guard': 'Refused for safety: the session directory did not pass its checks. Nothing was deleted.',
 			'menu.retryPending': 'Finish pending deletions',
 			'pending.title': 'Pending deletions',
 			'pending.lead':
-				'Sessions whose log could not be removed because the Host was still holding them. Unarchiving a session cancels its pending removal.',
+				'Sessions whose log could not be removed because the Host was still holding them, plus subagent leftovers from already-deleted conversations. Unarchiving a session cancels its pending removal.',
 			'pending.noStore': 'No Harness home could be resolved, so there is no deferred-purge store on this machine.',
 			'pending.count': '{count} session(s) are waiting to be removed from disk.',
+			'pending.orphans':
+				'{count} subagent session(s) were left behind by earlier deletions. The sidebar hides them but @ still offers them as references; cleaning up removes them too.',
 			'pending.none': 'Nothing is pending: every scheduled deletion has already completed.',
 			'pending.loading': 'Reading the pending list\u2026',
 			'pending.retry': 'Clean up now',
@@ -88,6 +92,7 @@ window.__ModuleLoader__.load({
 			'pending.still':
 				'{count} session(s) are still held in memory by the Host. Its history is untouched; this window can delete them the moment the Host releases them, so try again later \u2014 a restart is no longer required.',
 			'pending.done': 'Removed {count} session(s) from disk.',
+			'pending.orphansDone': 'Removed {count} leftover subagent session(s).',
 			'pending.drop': 'Dropped {count} entry that can no longer be purged (unarchived, or not deletable).',
 			'pending.fail': 'Failed: {message}',
 		}
@@ -95,7 +100,7 @@ window.__ModuleLoader__.load({
 			'menu.deleteSession': '删除会话',
 			'actions.delete': '删除',
 			'confirm.title': '永久删除该会话？',
-			'confirm.desc': '“{title}”及其日志将从磁盘移除，此操作无法撤销。',
+			'confirm.desc': '“{title}”及其日志、以及它启动过的子代理会话都将从磁盘移除，此操作无法撤销。',
 			'confirm.pending': '正在删除…',
 			'confirm.action': '永久删除',
 			'cancel': '取消',
@@ -105,14 +110,18 @@ window.__ModuleLoader__.load({
 				'该会话仍被 DSH 宿主加载在内存中，此刻无法立即删除。已登记为待删除：下次启动 DSH 时会自动从磁盘移除。在此之前它的历史不会被改动；若改变主意，取消归档即可撤销。',
 			'failed.loaded': '该会话仍被 DSH 宿主加载在内存中（通常是因为刚打开过它）。它的历史没有被动过。宿主重启释放该会话后，再点删除即可彻底移除。',
 			'failed.running': '该会话有正在进行的工作，请先停止，然后再删除。',
+			'failed.descendantRunning': '这个对话启动的子代理会话仍在工作，请先停止它，然后再删除。',
 			'failed.notArchived': '只有已归档的会话才能删除，请先归档。',
-			'failed.subagent': '这是子代理产生的会话，不支持删除。',
+			'failed.subagent': '这是子代理产生的会话，它所属的对话仍然存在，因此不能单独删除。请改为删除它所属的父对话。',
 			'failed.guard': '为安全起见已拒绝：会话目录未通过校验，未删除任何内容。',
 			'menu.retryPending': '完成待删除清理',
 			'pending.title': '待删除的清理',
-			'pending.lead': '这些会话的日志因为仍被宿主占用而没能删除。取消归档即可撤销对应的待删除登记。',
+			'pending.lead':
+				'这些会话的日志因为仍被宿主占用而没能删除；此外还有更早的删除遗留下来的子代理会话。取消归档即可撤销对应的待删除登记。',
 			'pending.noStore': '无法确定 Harness 主目录，这台机器上不存在待删除登记文件。',
 			'pending.count': '有 {count} 个会话等待从磁盘移除。',
+			'pending.orphans':
+				'有 {count} 个子代理会话是更早的删除遗留下来的：侧边栏不显示它们，但 @ 仍能引用到，立即清理将一并移除。',
 			'pending.none': '当前没有待删除项：已登记的清理都已完成。',
 			'pending.loading': '正在读取待删除列表\u2026',
 			'pending.retry': '立即清理',
@@ -120,6 +129,7 @@ window.__ModuleLoader__.load({
 			'pending.still':
 				'还有 {count} 个会话被宿主占用在内存中。它们的历史没有被改动；宿主一旦释放，在这里就能直接删除，稍后重试即可，不必再重启 DSH。',
 			'pending.done': '已从磁盘移除 {count} 个会话。',
+			'pending.orphansDone': '已移除 {count} 个遗留的子代理会话。',
 			'pending.drop': '已丢弃 {count} 条无法继续清理的登记（已取消归档，或本身不可删除）。',
 			'pending.fail': '失败：{message}',
 		}
@@ -133,6 +143,7 @@ window.__ModuleLoader__.load({
 			'archive-purge/session-deferred': 'failed.deferred',
 			'archive-purge/session-loaded': 'failed.loaded',
 			'archive-purge/session-running': 'failed.running',
+			'archive-purge/descendant-running': 'failed.descendantRunning',
 			'archive-purge/not-archived': 'failed.notArchived',
 			'archive-purge/subagent': 'failed.subagent',
 			'archive-purge/target-mismatch': 'failed.guard',
@@ -306,14 +317,19 @@ window.__ModuleLoader__.load({
 			const lines = []
 			if (state.phase === 'reading') lines.push(t('pending.loading'))
 			if (state.phase === 'ready' && state.result === null && state.error === null) {
-				const count = state.value?.sessionIds?.length ?? 0
-				lines.push(count === 0 ? t('pending.none') : t('pending.count', { count }))
+				const staged = state.value?.sessionIds?.length ?? 0
+				const leftovers = state.value?.orphanSubagentIds?.length ?? 0
+				if (staged > 0) lines.push(t('pending.count', { count: staged }))
+				if (leftovers > 0) lines.push(t('pending.orphans', { count: leftovers }))
+				if (staged === 0 && leftovers === 0) lines.push(t('pending.none'))
 			}
 			if (state.result !== null) {
+				const orphans = state.result.orphans?.deleted?.length ?? 0
 				if (state.result.deleted > 0) lines.push(t('pending.done', { count: state.result.deleted }))
+				if (orphans > 0) lines.push(t('pending.orphansDone', { count: orphans }))
 				if (state.result.stillStaged > 0) lines.push(t('pending.still', { count: state.result.stillStaged }))
 				if (state.result.dropped > 0) lines.push(t('pending.drop', { count: state.result.dropped }))
-				if (state.result.deleted === 0 && state.result.stillStaged === 0 && state.result.dropped === 0) {
+				if (state.result.deleted === 0 && orphans === 0 && state.result.stillStaged === 0 && state.result.dropped === 0) {
 					lines.push(t('pending.none'))
 				}
 			}

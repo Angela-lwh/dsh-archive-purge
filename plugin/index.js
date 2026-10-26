@@ -35,6 +35,15 @@
  * deleted log. The reverse order would resurrect a browsable session whose log
  * no longer exists.
  *
+ * A subagent Session is a Session of its own: its transcript lives in its own
+ * log directory, it is listed by `sessionQuery.listSessions()` like any other,
+ * and the sidebar hides every `origin: "subagent"` row unconditionally. That
+ * combination is why a deletion which removed only the parent's directory left
+ * the children behind, invisible in the sidebar but still offered by the `@`
+ * reference completion — the deleted conversation stayed readable through them.
+ * The purge therefore cascades to the target's subagent descendants, and
+ * subagent leftovers whose parent is already gone are swept.
+ *
  * @module @angela_lwh/dsh-archive-purge
  */
 import { readdir, rm, stat } from 'node:fs/promises'
@@ -45,10 +54,11 @@ import { basename, dirname, join, resolve } from 'node:path'
 export const name = 'archive-purge'
 /**
  * Internals exposed for the test harnesses. Cordis ignores exports it does not know,
- * and these four carry the arithmetic that silently misbehaves (a wrong home reads an
- * empty store and the deferred purge looks idle).
+ * and these carry the arithmetic that silently misbehaves (a wrong home reads an
+ * empty store and the deferred purge looks idle, and a misread lineage either
+ * strands a subagent log or deletes a fork).
  */
-export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession }
+export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents }
 /**
  * Hard service requirements. An array (not the older `{required, optional}`
  * object shape, which the vendored Cordis reads as services literally named
@@ -97,6 +107,18 @@ const PROJECT_DIR_KEY = /^--.*--$/
 const CODE_RUNNING = 'archive-purge/session-running'
 const CODE_LOADED = 'archive-purge/session-loaded'
 /**
+ * A subagent Session spawned by the target still has work in progress. Its
+ * transcript belongs to the target, so deleting the target would destroy a
+ * running conversation's context: refuse, exactly like {@link CODE_RUNNING}.
+ */
+const CODE_DESCENDANT_RUNNING = 'archive-purge/descendant-running'
+/**
+ * The target is itself a subagent Session of a Session that still exists. Its
+ * catalog entry lives in the parent's projection and a child delete would leave
+ * that entry dangling; a parent delete takes the child with it instead.
+ */
+const CODE_SUBAGENT = 'archive-purge/subagent'
+/**
  * The loaded Session has been *staged* instead: its purge is recorded and finishes
  * at the next Host start, when nothing is loaded any more. This is the fallback for
  * the one case the release step cannot cover — work in progress, or a Session that
@@ -116,7 +138,7 @@ const PENDING_VERSION = 1
  */
 const PERMANENT_REFUSALS = new Set([
   'archive-purge/not-archived',
-  'archive-purge/subagent',
+  CODE_SUBAGENT,
   'archive-purge/no-sessions-root',
   'archive-purge/target-mismatch',
   'archive-purge/target-not-a-session',
@@ -127,7 +149,7 @@ const PERMANENT_REFUSALS = new Set([
 /**
  * Register the deletion route, then finish any purge the previous Host could not.
  * @param ctx - Host plugin context carrying Connection, the Workspace registry, and persistence.
- * @param config - optional `{ sessionsRoot, releaseWaitMs, pendingFile, stageWhenLoaded }` overrides.
+ * @param config - optional `{ sessionsRoot, releaseWaitMs, pendingFile, stageWhenLoaded, releaseLoaded, sweepOrphans }` overrides.
  */
 export function apply(ctx, config = {}) {
   const settings = {
@@ -136,6 +158,7 @@ export function apply(ctx, config = {}) {
     pendingFile: readOptionalPath(config?.pendingFile),
     stageWhenLoaded: config?.stageWhenLoaded !== false,
     releaseLoaded: config?.releaseLoaded !== false,
+    sweepOrphans: config?.sweepOrphans !== false,
   }
   ctx.connection.fetch.register({
     path: ROUTE_PATH,
@@ -203,8 +226,9 @@ async function handleDeleteRequest(ctx, settings, request) {
 }
 
 /**
- * Permanently delete one archived Session: its log directory, its durable
- * membership, and its archive mark.
+ * Permanently delete one archived Session: its log directory, the log
+ * directories of the subagent Sessions it spawned, their and its durable
+ * membership, and their archive marks.
  *
  * Every precondition is re-checked here rather than trusted from the browser.
  * The archive mark is the only durable record that the user already asked this
@@ -215,7 +239,7 @@ async function handleDeleteRequest(ctx, settings, request) {
  * @param settings - resolved plugin config.
  * @param sessionId - target Session id.
  * @param signal - caller cancellation.
- * @returns a report of what was removed.
+ * @returns a report of what was removed, including the subagent descendants.
  * @throws {PurgeError} for every refusal, carrying a machine-readable `code`.
  */
 async function purgeArchivedSession(ctx, settings, sessionId, signal) {
@@ -241,15 +265,22 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
     // Session whose log is already gone stays archived, because clearing the mark
     // would surface it as a row that cannot be opened.
     if (isLoaded(sessions, agents, sessionId)) {
-      return { sessionId, deleted: false, reason: 'already-purged' }
+      return { sessionId, deleted: false, reason: 'already-purged', descendants: [], orphansSwept: [] }
     }
     await retireMetadata(ctx, registry, sessionId)
-    return { sessionId, deleted: false, reason: 'no-stored-log' }
+    const swept = await sweepOrphanSubagents(ctx, settings, signal)
+    return { sessionId, deleted: false, reason: 'no-stored-log', descendants: [], orphansSwept: swept.deleted }
   }
 
   const header = snapshot.header
-  if (header?.origin === 'subagent') {
-    throw new PurgeError('archive-purge/subagent', `session ${sessionId} is subagent-owned history`)
+  // One index serves the two questions a subagent target raises: does its parent
+  // still exist (a child of a live parent is refused, a leftover is deletable), and
+  // which Sessions did this one spawn. Without a listing the plugin cannot answer
+  // either, so it falls back to the original refusal rather than guessing.
+  const index = await collectSessionIndex(ctx)
+  signal?.throwIfAborted()
+  if (header?.origin === 'subagent' && !(await orphanSubagent(index, persistence, sessionId, signal))) {
+    throw new PurgeError(CODE_SUBAGENT, `session ${sessionId} is subagent-owned history`)
   }
 
   // Resolve and verify the target BEFORE deciding whether to act now: a bad target is
@@ -258,6 +289,23 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
   const directory = await resolveSessionDirectory(ctx, settings, persistence, header)
   await assertPurgeTarget(directory, sessionId)
   signal?.throwIfAborted()
+
+  // The Sessions this deletion takes with it. A subagent child is hidden from the
+  // sidebar by origin, but `sessionQuery.listSessions()` still lists it and the `@`
+  // reference completion offers it — so deleting only the parent leaves the
+  // conversation readable through its children.
+  const descendants = subagentDescendantIds(index, sessionId)
+  for (const descendant of descendants) {
+    if (agents?.get?.(descendant)?.status === 'running') {
+      throw new PurgeError(
+        CODE_DESCENDANT_RUNNING,
+        `subagent session ${descendant} of ${sessionId} has work in progress`,
+      )
+    }
+  }
+  // Verify every descendant directory BEFORE removing anything, so that one guard
+  // failure cannot leave a conversation half-deleted.
+  const plans = await planPurgeTargets(ctx, settings, persistence, index, directory, sessionId, descendants, signal)
 
   await waitForRelease(sessions, agents, sessionId, settings.releaseWaitMs, signal)
   if (isLoaded(sessions, agents, sessionId)) {
@@ -272,7 +320,16 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
       ctx.logger?.info?.(`archive-purge: kept ${sessionId} loaded (${released.reason}); its purge is staged`)
     }
   }
-  if (isLoaded(sessions, agents, sessionId)) {
+  // A descendant the Host still holds is released on the same terms: it is invisible
+  // history whose owner is being deleted, and work in progress was refused above.
+  for (const descendant of descendants) {
+    if (!isLoaded(sessions, agents, descendant)) continue
+    const released = await releaseLoadedSession(ctx, sessions, agents, descendant, settings, true)
+    ctx.logger?.info?.(released.released
+      ? `archive-purge: released the Host's hold on subagent ${descendant}`
+      : `archive-purge: kept subagent ${descendant} loaded (${released.reason})`)
+  }
+  if (isLoaded(sessions, agents, sessionId) || descendants.some((id) => isLoaded(sessions, agents, id))) {
     if (!settings.stageWhenLoaded) {
       throw new PurgeError(CODE_LOADED, `session ${sessionId} is still loaded by the Host`)
     }
@@ -283,12 +340,62 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
     )
   }
 
-  await rm(directory, { recursive: true, force: true, maxRetries: 3 })
-  await retireMetadata(ctx, registry, sessionId)
-  // Display-only removal on the forwarded-event allowlist: every connected GUI
-  // drops the row through `handleSessionRemoved` without a reload or restart.
-  ctx.emit('api-session/removed', sessionId)
-  return { sessionId, deleted: true, directory }
+  for (const plan of plans) {
+    if (plan.directory === undefined) continue
+    await rm(plan.directory, { recursive: true, force: true, maxRetries: 3 })
+  }
+  for (const plan of plans) await retireMetadata(ctx, registry, plan.sessionId)
+  for (const plan of plans) {
+    // Display-only removal on the forwarded-event allowlist: every connected GUI
+    // drops the row through `handleSessionRemoved` without a reload or restart.
+    ctx.emit('api-session/removed', plan.sessionId)
+  }
+  // Leftovers from deletions this plugin performed before it cascaded: their parent
+  // is already gone, so nothing can ever browse or open them again.
+  const swept = await sweepOrphanSubagents(ctx, settings, signal)
+  return {
+    sessionId,
+    deleted: true,
+    directory,
+    descendants: plans.slice(1).map((plan) => plan.sessionId),
+    orphansSwept: swept.deleted,
+  }
+}
+
+/**
+ * Every Session a purge will touch, with its verified directory, computed before
+ * the first byte is removed.
+ *
+ * A descendant whose log is not on disk (a live subagent that never materialized)
+ * still gets a plan with no directory, so its bookkeeping is retired with the rest
+ * instead of surviving as a ghost.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param persistence - `ctx.sessionPersistence`.
+ * @param index - the Session index, when one could be listed.
+ * @param directory - the target's own verified directory.
+ * @param sessionId - target Session id.
+ * @param descendants - subagent descendants of the target.
+ * @param signal - caller cancellation.
+ * @returns one plan per Session, the target first.
+ * @throws {PurgeError} when any target fails the directory guard.
+ */
+async function planPurgeTargets(ctx, settings, persistence, index, directory, sessionId, descendants, signal) {
+  const plans = [{ sessionId, directory }]
+  for (const descendant of descendants) {
+    signal?.throwIfAborted()
+    const header = index?.byId.get(descendant)
+    const stored = await persistence.stat(descendant, { signal })
+    if (stored === undefined) {
+      plans.push({ sessionId: descendant, directory: undefined })
+      continue
+    }
+    const childDirectory = await resolveSessionDirectory(ctx, settings, persistence, header ?? stored.header)
+    await assertPurgeTarget(childDirectory, descendant)
+    plans.push({ sessionId: descendant, directory: childDirectory })
+  }
+  return plans
 }
 
 /**
@@ -308,19 +415,22 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
  * surface, so releasing it destroys nothing the user can still see. A Session with
  * work in progress is never eligible, and neither is one the workspace registry
  * does not list as archived (a staged purge whose Session was unarchived in the
- * meantime).
+ * meantime). A subagent descendant is the one exception: it never carries an
+ * archive mark of its own because the sidebar never shows it, so the archived
+ * ancestor it belongs to is its authorization instead.
  *
  * @param ctx - Host context.
  * @param sessions - `ctx.sessions`, when present.
  * @param agents - `ctx.agents`, when present.
  * @param sessionId - target Session id.
  * @param settings - resolved plugin config.
+ * @param allowUnarchived - release a subagent descendant, which never carries an archive mark.
  * @returns whether it was released, and why not when it was not.
  */
-async function releaseLoadedSession(ctx, sessions, agents, sessionId, settings) {
+async function releaseLoadedSession(ctx, sessions, agents, sessionId, settings, allowUnarchived = false) {
   if (settings.releaseLoaded !== true) return { released: false, reason: 'disabled by configuration' }
   if (agents?.get?.(sessionId)?.status === 'running') return { released: false, reason: 'work in progress' }
-  if (!readArchivedIds(ctx.workspaceRegistry).includes(sessionId)) {
+  if (!allowUnarchived && !readArchivedIds(ctx.workspaceRegistry).includes(sessionId)) {
     return { released: false, reason: 'not archived' }
   }
   const entry = sessions?.store?.get?.(sessionId)
@@ -408,6 +518,199 @@ async function retireMetadata(ctx, registry, sessionId) {
 }
 
 /**
+ * Every Session header this Host can see, stored and live, keyed by id.
+ *
+ * The listing is the only source that can answer "does this Session's parent
+ * still exist" and "which Sessions did this one spawn" without opening a log. It
+ * is best-effort: a Host whose listing fails still deletes the Session the user
+ * named, it just cannot also take the descendants with it.
+ *
+ * @param ctx - Host context.
+ * @returns the index, or undefined when stored Sessions cannot be listed.
+ */
+async function collectSessionIndex(ctx) {
+  const persistence = ctx.sessionPersistence
+  if (typeof persistence?.list !== 'function') return undefined
+  const byId = new Map()
+  try {
+    const listed = await persistence.list()
+    if (Array.isArray(listed)) {
+      for (const snapshot of listed) {
+        const header = snapshot?.header
+        if (typeof header?.id !== 'string' || header.id === '') continue
+        byId.set(header.id, header)
+      }
+    }
+  } catch (error) {
+    ctx.logger?.warn?.(`archive-purge: could not list stored Sessions: ${messageOf(error)}`)
+    return undefined
+  }
+  const live = ctx.get('sessions')?.list?.()
+  if (Array.isArray(live)) {
+    for (const session of live) {
+      if (typeof session?.id !== 'string' || session.id === '') continue
+      // A live Session without a stored log still owns its children: its header is
+      // what keeps a just-spawned subagent from looking orphaned.
+      if (!byId.has(session.id) && session.header !== undefined) byId.set(session.id, session.header)
+    }
+  }
+  return { byId }
+}
+
+/**
+ * Ids of the subagent Sessions spawned by one Session, transitively.
+ *
+ * Lineage follows `parentSession` through `origin: "subagent"` headers only: a
+ * fork of a Session is an independent conversation and must survive its source.
+ *
+ * @param index - {@link collectSessionIndex}'s result, when available.
+ * @param rootId - the Session being deleted.
+ * @returns descendant ids, in breadth-first order, target excluded.
+ */
+function subagentDescendantIds(index, rootId) {
+  if (index === undefined) return []
+  const children = new Map()
+  for (const [id, header] of index.byId) {
+    if (header?.origin !== 'subagent') continue
+    const parent = header.parentSession
+    if (typeof parent !== 'string' || parent === '') continue
+    const bucket = children.get(parent)
+    if (bucket === undefined) children.set(parent, [id])
+    else bucket.push(id)
+  }
+  const descendants = []
+  const seen = new Set([rootId])
+  const queue = [rootId]
+  while (queue.length > 0) {
+    for (const child of children.get(queue.shift()) ?? []) {
+      if (seen.has(child)) continue
+      seen.add(child)
+      descendants.push(child)
+      queue.push(child)
+    }
+  }
+  return descendants
+}
+
+/**
+ * Whether a subagent header's parent is absent from a listing.
+ * @param index - the Session index.
+ * @param header - the candidate's header.
+ * @returns true for a subagent Session whose parent Session is gone.
+ */
+function isOrphanSubagentHeader(index, header) {
+  if (header?.origin !== 'subagent') return false
+  const parent = header.parentSession
+  if (typeof parent !== 'string' || parent === '') return false
+  return !index.byId.has(parent)
+}
+
+/**
+ * Whether the target is a subagent Session whose parent no longer exists.
+ *
+ * The listing alone is not proof: a parent whose log is still on disk but whose
+ * header cannot be decoded never reaches the listing, and its child must not be
+ * mistaken for a leftover. The parent's own `stat` settles that case, and a
+ * failure there counts as "still there" so an unreadable store never authorizes
+ * a delete.
+ *
+ * @param index - the Session index, when one could be listed.
+ * @param persistence - `ctx.sessionPersistence`.
+ * @param sessionId - candidate Session id.
+ * @param signal - caller cancellation.
+ * @returns true only when the parent is provably gone.
+ */
+async function orphanSubagent(index, persistence, sessionId, signal) {
+  if (index === undefined) return false
+  const header = index.byId.get(sessionId)
+  if (header === undefined || !isOrphanSubagentHeader(index, header)) return false
+  const parent = header.parentSession
+  try {
+    return (await persistence.stat(parent, { signal })) === undefined
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Leftover subagent Sessions: children whose parent Session is gone.
+ *
+ * These are what a deletion that did not cascade leaves behind. The sidebar
+ * hides every `origin: "subagent"` row, so nothing in the product can show them
+ * again, but `sessionQuery.listSessions()` still lists them and the `@`
+ * reference completion still offers them — a deleted conversation's transcripts
+ * stay readable through them.
+ *
+ * @param index - the Session index, when one could be listed.
+ * @returns the orphaned ids, sorted for a deterministic report.
+ */
+function orphanSubagentIds(index) {
+  if (index === undefined) return []
+  const orphans = []
+  for (const [id, header] of index.byId) if (isOrphanSubagentHeader(index, header)) orphans.push(id)
+  return orphans.sort()
+}
+
+/**
+ * Delete every leftover subagent Session whose parent is gone.
+ *
+ * Confined by construction: a candidate must be subagent-origin, its parent must
+ * be absent from both the listing and a direct `stat`, it must be idle and not
+ * held by the Host, and its directory must pass the same guard as a normal purge.
+ * A candidate that is held, running, or fails a guard is reported and left for a
+ * later pass; it is never forced.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param signal - caller cancellation.
+ * @returns what was examined, deleted, skipped, and failed.
+ */
+async function sweepOrphanSubagents(ctx, settings, signal) {
+  const report = { examined: 0, deleted: [], skipped: [], failed: [] }
+  if (settings.sweepOrphans !== true) return report
+  const index = await collectSessionIndex(ctx)
+  if (index === undefined) return report
+  const persistence = ctx.sessionPersistence
+  const sessions = ctx.get('sessions')
+  const agents = ctx.get('agents')
+  const candidates = orphanSubagentIds(index)
+  report.examined = candidates.length
+  for (const sessionId of candidates) {
+    signal?.throwIfAborted()
+    if (agents?.get?.(sessionId)?.status === 'running') {
+      report.skipped.push({ sessionId, reason: 'work in progress' })
+      continue
+    }
+    if (isLoaded(sessions, agents, sessionId)) {
+      report.skipped.push({ sessionId, reason: 'held by the Host' })
+      continue
+    }
+    const header = index.byId.get(sessionId)
+    if (!(await orphanSubagent(index, persistence, sessionId, signal))) {
+      report.skipped.push({ sessionId, reason: 'its parent is back' })
+      continue
+    }
+    try {
+      const snapshot = await persistence.stat(sessionId, { signal })
+      if (snapshot !== undefined) {
+        const directory = await resolveSessionDirectory(ctx, settings, persistence, snapshot.header ?? header)
+        await assertPurgeTarget(directory, sessionId)
+        await rm(directory, { recursive: true, force: true, maxRetries: 3 })
+      }
+      await retireMetadata(ctx, ctx.workspaceRegistry, sessionId)
+      ctx.emit('api-session/removed', sessionId)
+      report.deleted.push(sessionId)
+    } catch (error) {
+      report.failed.push({ sessionId, code: error?.code ?? 'archive-purge/failed', message: messageOf(error) })
+    }
+  }
+  if (report.deleted.length > 0) {
+    ctx.logger?.info?.(`archive-purge: removed ${String(report.deleted.length)} leftover subagent session(s) of deleted conversations`)
+  }
+  return report
+}
+
+/**
  * Record one Session whose purge has to wait for the next Host start.
  *
  * The archive mark is deliberately left in place: it is both the authorization for
@@ -434,11 +737,13 @@ async function stageStagedPurge(ctx, settings, sessionId, directory) {
 }
 
 /**
- * Finish the purges staged by a previous Host, now that nothing is loaded.
+ * Finish the purges staged by a previous Host, now that nothing is loaded, and
+ * sweep the subagent leftovers of deletions performed before the purge cascaded.
  *
  * Runs once, off the composition path: a failure here must never stop the profile
  * from booting, and an entry that is somehow still loaded stays staged for the next
- * start instead of being dropped.
+ * start instead of being dropped. The two passes are independent so that an
+ * unresolvable deferred-purge store cannot also strand the leftovers.
  *
  * @param ctx - Host context.
  * @param settings - resolved plugin config.
@@ -446,17 +751,26 @@ async function stageStagedPurge(ctx, settings, sessionId, directory) {
 function scheduleStagedPurges(ctx, settings) {
   Promise.resolve()
     .then(async () => {
-      const report = await drainStagedPurges(ctx, settings, undefined)
-      for (const entry of report.results) {
-        if (entry.outcome === 'deleted') {
-          ctx.logger?.info?.(`archive-purge: staged purge of ${entry.sessionId}: log removed`)
-        } else if (entry.outcome === 'nothing-to-remove') {
-          ctx.logger?.info?.(`archive-purge: staged purge of ${entry.sessionId}: nothing to remove (${String(entry.reason)})`)
-        } else if (entry.outcome === 'dropped') {
-          ctx.logger?.warn?.(`archive-purge: staged purge of ${entry.sessionId} dropped (${String(entry.code)}): ${String(entry.message)}`)
-        } else {
-          ctx.logger?.warn?.(`archive-purge: staged purge of ${entry.sessionId} could not run (${String(entry.code)}); keeping it staged`)
+      try {
+        const report = await drainStagedPurges(ctx, settings, undefined)
+        for (const entry of report.results) {
+          if (entry.outcome === 'deleted') {
+            ctx.logger?.info?.(`archive-purge: staged purge of ${entry.sessionId}: log removed`)
+          } else if (entry.outcome === 'nothing-to-remove') {
+            ctx.logger?.info?.(`archive-purge: staged purge of ${entry.sessionId}: nothing to remove (${String(entry.reason)})`)
+          } else if (entry.outcome === 'dropped') {
+            ctx.logger?.warn?.(`archive-purge: staged purge of ${entry.sessionId} dropped (${String(entry.code)}): ${String(entry.message)}`)
+          } else {
+            ctx.logger?.warn?.(`archive-purge: staged purge of ${entry.sessionId} could not run (${String(entry.code)}); keeping it staged`)
+          }
         }
+      } catch (error) {
+        ctx.logger?.warn?.(`archive-purge: staged purge pass failed: ${messageOf(error)}`)
+      }
+      try {
+        await sweepOrphanSubagents(ctx, settings, undefined)
+      } catch (error) {
+        ctx.logger?.warn?.(`archive-purge: leftover subagent sweep failed: ${messageOf(error)}`)
       }
     })
     .catch((error) => {
@@ -524,18 +838,21 @@ async function drainStagedPurges(ctx, settings, signal) {
  * What is staged right now, without touching it.
  *
  * The browser half asks before it offers the retry, and again after running one, so
- * the pending set is read in exactly one place.
+ * the pending set is read in exactly one place. The same read answers the second
+ * kind of leftover: subagent Sessions whose parent conversation was deleted before
+ * this plugin cascaded, which nothing else in the product can reach any more.
  *
  * @param ctx - Host context.
  * @param settings - resolved plugin config.
- * @returns the pending store's path and its Session ids.
+ * @returns the pending store's path, its Session ids, and the leftover subagent ids.
  */
 async function listPendingPurge(ctx, settings) {
   const path = await pendingFilePath(ctx, settings, undefined)
   if (path === undefined) {
     throw new PurgeError('archive-purge/no-pending-store', 'no Harness home could be resolved, so there is no deferred-purge store to read')
   }
-  return { pendingFile: path, sessionIds: readPending(path) }
+  const index = await collectSessionIndex(ctx)
+  return { pendingFile: path, sessionIds: readPending(path), orphanSubagentIds: orphanSubagentIds(index) }
 }
 
 /**
@@ -544,18 +861,21 @@ async function listPendingPurge(ctx, settings) {
  * A Session the Host has since released is purged on the spot; one it still holds
  * stays staged and is reported as such. Nothing here widens what may be deleted:
  * every entry re-enters {@link purgeArchivedSession}, which re-checks the archive
- * mark, the running Agent, the target directory and the loaded state.
+ * mark, the running Agent, the target directory and the loaded state. The pass
+ * then sweeps leftover subagent Sessions, so one cleanup also removes what earlier
+ * deletions left behind.
  *
  * @param ctx - Host context.
  * @param settings - resolved plugin config.
  * @param signal - caller cancellation.
- * @returns the pass report plus the ids that are still loaded.
+ * @returns the pass report plus the ids that are still loaded and the sweep.
  */
 async function retryPendingPurge(ctx, settings, signal) {
   const report = await drainStagedPurges(ctx, settings, signal)
   const sessions = ctx.get('sessions')
   const agents = ctx.get('agents')
-  return { ...report, stillLoaded: report.remaining.filter((sessionId) => isLoaded(sessions, agents, sessionId)) }
+  const orphans = await sweepOrphanSubagents(ctx, settings, signal)
+  return { ...report, stillLoaded: report.remaining.filter((sessionId) => isLoaded(sessions, agents, sessionId)), orphans }
 }
 
 /**

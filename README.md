@@ -19,11 +19,17 @@
 4. 若宿主此刻仍加载着这个会话，先**释放**宿主的持有（只有已归档且空闲的才会释放；正在干活的
    永不释放）；
 5. 递归删除该目录 —— 这个会话的全部日志世代；
-6. 清掉持久记录：工作区归属与归档标记，然后通知所有已连上的界面立刻移除那一行。
+6. **连同它启动过的子代理会话一起删除**：子代理是独立会话，侧边栏永远不显示它们，但 `@`
+   引用列表会列出它们 —— 只删父会话，已删对话的记录仍能从子代理会话里被引用出来；
+7. 清掉持久记录：每个被删会话的工作区归属与归档标记，然后通知所有已连上的界面立刻移除那些行。
 
-**当场删不掉的情况**：正在干活的会话任何情况都不删；暂时释放不掉的会被**登记**下来
-（`$DSH_HOME/archive-purge/pending.json`），在下次 DSH 启动时自动完成，也可以随时手动完成（见下）。
-登记期间会话历史原样不动，**取消归档即可撤销**这次登记。
+**历史遗留也会被清掉**：更早的版本只删父会话，于是留下了「父会话已不存在」的子代理会话。这类
+残留既不会出现在侧边栏，也不再属于任何可用对话，插件会在下次启动、下次删除、或点「完成待删除
+清理」时把它们一并移除（`sweepOrphans: false` 可关闭）。
+
+**当场删不掉的情况**：正在干活的会话（包括其子代理会话）任何情况都不删；暂时释放不掉的会被
+**登记**下来（`$DSH_HOME/archive-purge/pending.json`），在下次 DSH 启动时自动完成，也可以随时
+手动完成（见下）。登记期间会话历史原样不动，**取消归档即可撤销**这次登记。
 
 **刻意不碰**：附件（`$DSH_HOME/attachments`，跨会话共享）与投影缓存。删除不可逆，不进回收站。
 
@@ -42,7 +48,7 @@ dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge
 dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge#<40 位完整 commit>
 
 # ④ Release 的 tarball
-dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.3/dsh-archive-purge-1.0.3.tgz
+dsh plugin --profile desktop add https://github.com/Angela-lwh/dsh-archive-purge/releases/download/v1.0.4/dsh-archive-purge-1.0.4.tgz
 
 # ⑤ 本机已有检出 —— 改完代码即时生效，适合自己开发
 dsh plugin --profile desktop add file:<本仓库的绝对路径>/plugin
