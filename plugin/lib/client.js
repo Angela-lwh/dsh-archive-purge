@@ -477,11 +477,82 @@ window.__ModuleLoader__.load({
 		const inject = ['slots', 'workspaces', 'locale']
 
 		/**
+		 * How long the page may sit idle before its carrier is presumed stale.
+		 *
+		 * The client connection has no heartbeat: it listens for the browser's
+		 * `online`/`offline` events only, and a laptop sleep leaves the WebSocket
+		 * half-open — `navigator.onLine` never changes, no frame is sent, and the
+		 * Workspace stream simply stops delivering. The page keeps a snapshot from
+		 * before the sleep, so new Sessions look ungrouped and the Workspace picker
+		 * shows yesterday's memberships until the page is reloaded by hand.
+		 */
+		const IDLE_RECONNECT_GAP_MS = 30 * 60 * 1000
+
+		/**
+		 * Decide whether an activity after a gap should re-establish the carrier.
+		 * Pure, so the rule is testable without timers.
+		 * @param {{ idleMs: number, sinceReconnectMs: number }} input - the gap since the last activity, and since the last reconnect.
+		 * @param {number} gapMs - the threshold both gaps must reach.
+		 * @returns whether a reconnect is due.
+		 */
+		function shouldReconnectAfterIdle(input, gapMs = IDLE_RECONNECT_GAP_MS) {
+			return input.idleMs >= gapMs && input.sinceReconnectMs >= gapMs
+		}
+
+		/**
+		 * Re-establish the connection when the page wakes up after a long idle gap.
+		 *
+		 * Reconnecting is the narrowest cure available to a plugin: the Host drops the
+		 * old generation and every stream re-baselines, so the Workspace projection is
+		 * fetched fresh. It runs only after `IDLE_RECONNECT_GAP_MS` with no user
+		 * activity, at most once per gap, and never when the Host exposes no
+		 * `connection.reconnect()`; a turn that was running keeps running on the Host
+		 * and resumes through the re-baselined stream.
+		 *
+		 * @param ctx - client root Context.
+		 * @param host - the page environment (`document`, `window`, `now`), injectable for tests.
+		 * @returns a disposer, when listeners were installed.
+		 */
+		function installIdleReconnect(ctx, host = globalThis) {
+			const document_ = host.document
+			const window_ = host.window ?? host
+			const now = typeof host.now === 'function' ? host.now : () => Date.now()
+			if (document_ === undefined || typeof document_.addEventListener !== 'function') return undefined
+			const connection = ctx.get('connection')
+			if (typeof connection?.reconnect !== 'function') return undefined
+			let lastActiveAt = now()
+			let lastReconnectAt = 0
+			const noteActivity = () => {
+				const at = now()
+				const due = shouldReconnectAfterIdle({ idleMs: at - lastActiveAt, sinceReconnectMs: at - lastReconnectAt })
+				lastActiveAt = at
+				if (!due) return
+				lastReconnectAt = at
+				try {
+					connection.reconnect()
+				} catch {
+					// Best effort: a failed reconnect leaves the page as stale as before.
+				}
+			}
+			const events = ['pointerdown', 'keydown', 'focus']
+			for (const name of events) window_.addEventListener?.(name, noteActivity, true)
+			const onVisible = () => {
+				if (document_.visibilityState === 'visible') noteActivity()
+			}
+			document_.addEventListener('visibilitychange', onVisible, true)
+			return () => {
+				for (const name of events) window_.removeEventListener?.(name, noteActivity, true)
+				document_.removeEventListener?.('visibilitychange', onVisible, true)
+			}
+		}
+
+		/**
 		 * Register the two row actions and the confirmation dialog.
 		 * @param ctx - client root Context.
 		 */
 		function apply(ctx) {
 			installStyles(globalThis.document)
+			installIdleReconnect(ctx)
 
 			const workspaces = ctx.get('workspaces')
 			const sessions = ctx.get('sessions')
@@ -635,9 +706,11 @@ window.__ModuleLoader__.load({
 		exports.name = 'archive-purge'
 		exports.inject = inject
 		exports.apply = apply
-		// The refusal-copy table is the one pure function worth reaching from the
-		// headless bundle test; Cordis ignores exports it does not know.
+		// The refusal-copy table and the idle-reconnect rule are the pure pieces worth
+		// reaching from the headless bundle test; Cordis ignores exports it does not know.
 		exports.describeFailure = describeFailure
+		exports.shouldReconnectAfterIdle = shouldReconnectAfterIdle
+		exports.installIdleReconnect = installIdleReconnect
 		return module.exports
 	},
 })

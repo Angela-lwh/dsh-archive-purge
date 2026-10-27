@@ -385,4 +385,49 @@ const noStore = Object.assign(new Error('no home'), { code: 'archive-purge/no-pe
 assert.equal(exported.describeFailure(noStore, tZh), zh['pending.noStore'],
   'a missing pending store gets its own explanation rather than a raw code')
 
+// ---- the idle reconnect: the carrier has no heartbeat ---------------------------
+
+assert.equal(exported.shouldReconnectAfterIdle({ idleMs: 29 * 60 * 1000, sinceReconnectMs: 60 * 60 * 1000 }), false,
+  'a short idle gap must never reconnect')
+assert.equal(exported.shouldReconnectAfterIdle({ idleMs: 31 * 60 * 1000, sinceReconnectMs: 5 * 60 * 1000 }), false,
+  'the gap since the last reconnect must pass as well')
+assert.equal(exported.shouldReconnectAfterIdle({ idleMs: 31 * 60 * 1000, sinceReconnectMs: 31 * 60 * 1000 }), true,
+  'a long idle gap with no recent reconnect is due')
+
+const listeners = new Map()
+const reconnects = []
+let clock = 0
+const fakeDocument = {
+  visibilityState: 'visible',
+  addEventListener: (name, fn) => listeners.set(`doc:${name}`, fn),
+  removeEventListener: (name) => listeners.delete(`doc:${name}`),
+}
+const fakeWindow = {
+  addEventListener: (name, fn) => listeners.set(`win:${name}`, fn),
+  removeEventListener: (name) => listeners.delete(`win:${name}`),
+}
+const connectionCtx = {
+  get: (name) => (name === 'connection' ? { reconnect: () => reconnects.push(clock) } : undefined),
+}
+assert.equal(exported.installIdleReconnect({ get: () => undefined }, { document: fakeDocument, window: fakeWindow, now: () => clock }), undefined,
+  'a Host without the connection service installs nothing')
+const dispose = exported.installIdleReconnect(connectionCtx, { document: fakeDocument, window: fakeWindow, now: () => clock })
+assert.equal(typeof dispose, 'function', 'the watchdog must be removable')
+
+clock = 1000
+listeners.get('win:pointerdown')()
+assert.deepEqual(reconnects, [], 'activity inside the gap must not reconnect')
+clock += 31 * 60 * 1000
+listeners.get('win:pointerdown')()
+assert.deepEqual(reconnects, [clock], 'the first activity after a long gap reconnects once')
+listeners.get('win:keydown')()
+assert.deepEqual(reconnects, [clock], 'the cooldown holds for the activity right after it')
+clock += 31 * 60 * 1000
+listeners.get('doc:visibilitychange')()
+assert.equal(reconnects.length, 2, 'a later long gap reconnects again')
+
+dispose()
+assert.equal(listeners.has('win:pointerdown'), false, 'disposing unbinds the activity listeners')
+assert.equal(listeners.has('doc:visibilitychange'), false, 'disposing unbinds the visibility listener')
+
 console.log('client bundle: all assertions passed')
