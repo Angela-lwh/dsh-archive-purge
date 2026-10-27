@@ -87,6 +87,8 @@ window.__ModuleLoader__.load({
 				'{count} subagent session(s) were left behind by earlier deletions. The sidebar hides them but @ still offers them as references; cleaning up removes them too.',
 			'pending.blanks': '{count} unused blank session(s) will also be removed.',
 			'pending.blanksDone': 'Removed {count} unused blank session(s).',
+			'pending.blanksHeld': 'Left {count} blank session(s) in place: still open, already used, or its log is not a placeholder.',
+			'pending.blanksFailed': 'Could not remove {count} blank session(s).',
 			'pending.none': 'Nothing is pending: every scheduled deletion has already completed.',
 			'pending.loading': 'Reading the pending list\u2026',
 			'pending.retry': 'Clean up now',
@@ -126,6 +128,8 @@ window.__ModuleLoader__.load({
 				'有 {count} 个子代理会话是更早的删除遗留下来的：侧边栏不显示它们，但 @ 仍能引用到，立即清理将一并移除。',
 			'pending.blanks': '还会清理 {count} 个从未开始的空白会话。',
 			'pending.blanksDone': '已清理 {count} 个从未开始的空白会话。',
+			'pending.blanksHeld': '有 {count} 个空白会话没有动：仍被占用、已有内容，或日志不像占位。',
+			'pending.blanksFailed': '有 {count} 个空白会话没能删掉。',
 			'pending.none': '当前没有待删除项：已登记的清理都已完成。',
 			'pending.loading': '正在读取待删除列表\u2026',
 			'pending.retry': '立即清理',
@@ -332,12 +336,16 @@ window.__ModuleLoader__.load({
 			if (state.result !== null) {
 				const orphans = state.result.orphans?.deleted?.length ?? 0
 				const blanks = state.result.blanks?.deleted?.length ?? 0
+				const blanksHeld = state.result.blanks?.skipped?.length ?? 0
+				const blanksFailed = state.result.blanks?.failed?.length ?? 0
 				if (state.result.deleted > 0) lines.push(t('pending.done', { count: state.result.deleted }))
 				if (orphans > 0) lines.push(t('pending.orphansDone', { count: orphans }))
 				if (blanks > 0) lines.push(t('pending.blanksDone', { count: blanks }))
+				if (blanksHeld > 0) lines.push(t('pending.blanksHeld', { count: blanksHeld }))
+				if (blanksFailed > 0) lines.push(t('pending.blanksFailed', { count: blanksFailed }))
 				if (state.result.stillStaged > 0) lines.push(t('pending.still', { count: state.result.stillStaged }))
 				if (state.result.dropped > 0) lines.push(t('pending.drop', { count: state.result.dropped }))
-				if (state.result.deleted === 0 && orphans === 0 && blanks === 0 && state.result.stillStaged === 0 && state.result.dropped === 0) {
+				if (state.result.deleted === 0 && orphans === 0 && blanks === 0 && blanksHeld === 0 && blanksFailed === 0 && state.result.stillStaged === 0 && state.result.dropped === 0) {
 					lines.push(t('pending.none'))
 				}
 			}

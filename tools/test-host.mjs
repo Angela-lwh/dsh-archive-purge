@@ -60,6 +60,12 @@ function scenario() {
     pendingWrites: new Set(),
     /** Root-scope event listeners the plugin registered, in order. */
     listeners: [],
+    /** Reactive injections the plugin asked for: `{ deps, ready }`. */
+    injections: [],
+    /** False keeps injections pending until the test releases them. */
+    servicesReady: true,
+    /** The `@` reference resolver the filter wraps, when a scenario installs one. */
+    resolver: undefined,
     /** Session ids the Host holds in its in-memory store. */
     loaded: new Set(),
     /** Session id -> Agent status, for ids the Host holds as live Agents. */
@@ -179,16 +185,30 @@ function ctxFor(world) {
           },
         }
       }
+      if (service === 'sessionProjections') {
+        return {
+          snapshot: (session) => {
+            const values = world.projections[session.id]
+            return values === undefined ? undefined : { values }
+          },
+        }
+      }
+      if (service === 'sessionReferenceResolver') return world.resolver
       if (service === 'sessionQuery') {
         return {
-          async load(sessionId) {
+          async readSession(sessionId) {
             world.loads.push(sessionId)
-            return { header: world.headers[sessionId], events: world.sessionEvents[sessionId] ?? [] }
+            return { session: world.headers[sessionId], inheritedEventCount: 0, events: world.sessionEvents[sessionId] ?? [] }
           },
         }
       }
       if (service === 'loader') return { entries: () => [{ options: { name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: world.root } } }] }
       return undefined
+    },
+    inject(deps, callback) {
+      world.injections.push({ deps, ready: world.servicesReady === true, callback })
+      if (world.servicesReady === true) callback()
+      return () => {}
     },
     on(event, listener) {
       world.listeners.push({ event, listener })
@@ -638,6 +658,103 @@ async function seedBlank(world, projectSlug, sessionId, { createdAt = Date.now()
   await waitFor(() => !existsSync(join(world.root, projectSlug, sessionId)))
   assert.equal(existsSync(join(world.root, projectSlug, sessionId)), false, 'the startup pass removes it')
   await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The pass reads through the public `readSession`. The service never had an
+  // internal `load` (that belongs to its corpus), and checking for one is exactly
+  // why every production pass used to return before examining anything.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-blank'
+  await seedBlank(world, projectSlug, sessionId)
+  launch(world, { sweepBlanks: false })
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0 })
+  assert.deepEqual(report.deleted, [sessionId], JSON.stringify(report))
+  assert.deepEqual(world.loads, [sessionId], 'the log is read through readSession')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A read service without the public method is reported instead of leaving an empty
+  // report that reads like "nothing to collect".
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  await seedBlank(world, '--D-Project-demo--', 'session-blank')
+  const ctx = ctxFor(world)
+  const get = ctx.get.bind(ctx)
+  ctx.get = (service) => (service === 'sessionQuery' ? { async load() { throw new Error('not the public API') } } : get(service))
+
+  const report = await __test.sweepBlankSessions(ctx, { sweepBlanks: true, blankMinAgeMs: 0 })
+  assert.equal(report.reason, 'no-session-query')
+  assert.deepEqual(report.deleted, [])
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The opening pass must wait for `sessionQuery` instead of reading it during `apply`:
+  // a sweep that runs before the service is registered cannot prove "no turn" and used
+  // to return silently, which is indistinguishable from "nothing to collect".
+  const world = scenario()
+  world.servicesReady = false
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
+  const projectSlug = '--D-Project-demo--'
+  const sessionId = 'session-blank'
+  await seedBlank(world, projectSlug, sessionId)
+  launch(world)
+  await new Promise((resolve) => {
+    setTimeout(resolve, 150)
+  })
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), true, 'nothing is swept before the query service exists')
+  const scheduled = world.injections.find((entry) => entry.deps.includes('sessionQuery'))
+  assert.ok(scheduled !== undefined, 'the opening pass is scheduled through a reactive injection')
+  world.servicesReady = true
+  scheduled.callback()
+  await waitFor(() => !existsSync(join(world.root, projectSlug, sessionId)))
+  assert.equal(existsSync(join(world.root, projectSlug, sessionId)), false, 'the pass runs once the service is ready')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // `@` discovery wraps the resolver's label step: a positively blank placeholder is
+  // dropped, an unknown one stays listed, and a Session with history is untouched.
+  const world = scenario()
+  world.projections = {
+    'session-blank': { sessionListMetadata: { blank: true } },
+    'session-used': { sessionListMetadata: { blank: false } },
+    'session-unknown': {},
+  }
+  world.resolver = {
+    projectedLabels: (items) => items.map((item) => ({ ...item, label: item.record.header.id, displayTitle: item.record.header.id })),
+  }
+  launch(world)
+  const items = ['session-blank', 'session-used', 'session-unknown'].map((id, index) => ({ record: { header: { id } }, index }))
+  const kept = world.resolver.projectedLabels(items).map((item) => item.record.header.id)
+  assert.deepEqual(kept, ['session-used', 'session-unknown'], 'only the proven placeholder leaves the reference list')
+}
+
+{
+  // The filter is opt-out: a Host that wants every listed Session back gets it.
+  const world = scenario()
+  world.projections = { 'session-blank': { sessionListMetadata: { blank: true } } }
+  world.resolver = {
+    projectedLabels: (items) => items.map((item) => ({ ...item, label: item.record.header.id, displayTitle: item.record.header.id })),
+  }
+  launch(world, { filterBlankReferences: false })
+  const items = [{ record: { header: { id: 'session-blank' } }, index: 0 }]
+  assert.deepEqual(world.resolver.projectedLabels(items).map((item) => item.record.header.id), ['session-blank'],
+    'filterBlankReferences: false keeps the placeholder listed')
+}
+
+{
+  // A Host whose reference package changed shape stays untouched: no label step means
+  // no wrapper, and the resolver keeps working exactly as shipped.
+  const world = scenario()
+  world.resolver = { projectedLabels: undefined }
+  launch(world)
+  assert.equal(typeof world.resolver.projectedLabels, 'undefined', 'a resolver without the step is never wrapped')
 }
 
 {

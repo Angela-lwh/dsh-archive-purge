@@ -170,7 +170,7 @@ const PERMANENT_REFUSALS = new Set([
 /**
  * Register the deletion route, then finish any purge the previous Host could not.
  * @param ctx - Host plugin context carrying Connection, the Workspace registry, and persistence.
- * @param config - optional `{ sessionsRoot, releaseWaitMs, pendingFile, stageWhenLoaded, releaseLoaded, sweepOrphans, sweepBlanks, blankMinAgeMs }` overrides.
+ * @param config - optional `{ sessionsRoot, releaseWaitMs, pendingFile, stageWhenLoaded, releaseLoaded, sweepOrphans, sweepBlanks, blankMinAgeMs, filterBlankReferences }` overrides.
  */
 export function apply(ctx, config = {}) {
   const settings = {
@@ -182,6 +182,7 @@ export function apply(ctx, config = {}) {
     sweepOrphans: config?.sweepOrphans !== false,
     sweepBlanks: config?.sweepBlanks !== false,
     blankMinAgeMs: readNonNegativeMs(config?.blankMinAgeMs, DEFAULT_BLANK_MIN_AGE_MS),
+    filterBlankReferences: config?.filterBlankReferences !== false,
   }
   ctx.connection.fetch.register({
     path: ROUTE_PATH,
@@ -189,8 +190,10 @@ export function apply(ctx, config = {}) {
     requestBody: 'buffered',
     fetch: (request) => handleDeleteRequest(ctx, settings, request),
   })
+  installBlankReferenceFilter(ctx, settings)
   watchBlankSessions(ctx, settings)
   scheduleStagedPurges(ctx, settings)
+  scheduleBlankSweepWhenReady(ctx, settings)
 }
 
 /**
@@ -749,12 +752,77 @@ async function sweepOrphanSubagents(ctx, settings, signal) {
  */
 function cachedBlank(projections, header) {
   try {
-    const snapshot = projections?.cachedSnapshot?.(header, [BLANK_PROJECTION])
-    const value = snapshot?.values?.[BLANK_PROJECTION]
-    return typeof value?.blank === 'boolean' ? value.blank : undefined
+    return readBlankValue(projections?.cachedSnapshot?.(header, [BLANK_PROJECTION]))
   } catch {
     return undefined
   }
+}
+
+/** One projection snapshot's `blank` flag, or undefined when it cannot answer. */
+function readBlankValue(snapshot) {
+  const value = snapshot?.values?.[BLANK_PROJECTION]
+  return typeof value?.blank === 'boolean' ? value.blank : undefined
+}
+
+/**
+ * Whether a listed Session has never started a turn, answered the way the Session
+ * list answers it: the live projection cut for an attached Session, the durable
+ * checkpoint for a cold one. Unknown stays unknown.
+ *
+ * @param ctx - Host context.
+ * @param header - the Session header the caller already holds.
+ * @returns `true`, `false`, or `undefined`.
+ */
+function projectionBlank(ctx, header) {
+  try {
+    const session = ctx.get('sessions')?.get?.(header.id)
+    if (session !== undefined) {
+      return readBlankValue(ctx.get('sessionProjections')?.snapshot?.(session, [BLANK_PROJECTION]))
+    }
+    return cachedBlank(ctx.get('sessionProjectionCache'), header)
+  } catch {
+    return undefined
+  }
+}
+
+/** Marks a resolver whose label projection this plugin already filtered. */
+const BLANK_REFERENCE_FILTER = Symbol('archive-purge.blank-reference-filter')
+
+/**
+ * Keep untouched Session placeholders out of `@` reference discovery.
+ *
+ * `sessionQuery.listSessions()` lists a blank placeholder like any other Session,
+ * while the sidebar hides every blank row — so the `@` menu offered the very
+ * "new conversation" shells the user abandoned. The proper fix is in
+ * `@deepseek-ai/dsh-session-reference` itself (its label projection never asks for
+ * `sessionListMetadata`); until every Host carries it, this wraps the resolver's
+ * label step, which is the one place where it already holds each listed header.
+ *
+ * Deliberately conservative: only a positive `blank` is dropped, an unanswerable
+ * Session stays listed, a resolver without that step is left alone, and the filter
+ * can be switched off with `filterBlankReferences: false`.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ */
+function installBlankReferenceFilter(ctx, settings) {
+  if (settings.filterBlankReferences !== true || typeof ctx.inject !== 'function') return
+  ctx.inject(['sessionReferenceResolver'], () => {
+    try {
+      const resolver = ctx.get('sessionReferenceResolver')
+      if (resolver === undefined || resolver[BLANK_REFERENCE_FILTER] === true) return
+      if (typeof resolver.projectedLabels !== 'function') return
+      const original = resolver.projectedLabels
+      Object.defineProperty(resolver, BLANK_REFERENCE_FILTER, { value: true, configurable: true })
+      resolver.projectedLabels = function filterBlankLabels(items) {
+        const labelled = original.call(this, items)
+        if (!Array.isArray(labelled)) return labelled
+        return labelled.filter((item) => projectionBlank(ctx, item?.record?.header) !== true)
+      }
+    } catch (error) {
+      ctx.logger?.warn?.(`archive-purge: blank reference filter not installed: ${messageOf(error)}`)
+    }
+  })
 }
 
 /** Whether the Workspace registry pins this Session; a pinned row is never swept. */
@@ -816,10 +884,25 @@ async function sweepBlankSessions(ctx, settings, signal) {
   const report = { examined: 0, deleted: [], skipped: [], failed: [] }
   if (settings.sweepBlanks !== true) return report
   const index = await collectSessionIndex(ctx)
-  const query = ctx.get('sessionQuery')
+  // `readSession` is the public read; `load` belongs to the internal corpus of
+  // `@deepseek-ai/dsh-session-query` and is not on the service at all — checking for
+  // it made every pass since the first release return here, silently.
+  const query = settings.sessionQueryService ?? ctx.get('sessionQuery')
+  const readLog = typeof query?.readSession === 'function'
+    ? (sessionId) => query.readSession(sessionId)
+    : undefined
   // Without the read service the plugin cannot prove "no turn ever started", so it
-  // does nothing rather than deleting on a cache hint alone.
-  if (index === undefined || typeof query?.load !== 'function') return report
+  // does nothing rather than deleting on a cache hint alone — and says why.
+  if (index === undefined) {
+    report.reason = 'no-session-listing'
+    ctx.logger?.info?.('archive-purge: blank sweep found no session listing; skipping this pass')
+    return report
+  }
+  if (readLog === undefined) {
+    report.reason = 'no-session-query'
+    ctx.logger?.info?.('archive-purge: blank sweep has no readable session query; skipping this pass')
+    return report
+  }
   const persistence = ctx.sessionPersistence
   const candidates = blankCandidates(index, ctx.get('sessionProjectionCache'), ctx.get('sessions'), ctx.get('agents'), ctx.workspaceRegistry, {
     minAgeMs: settings.blankMinAgeMs,
@@ -847,7 +930,7 @@ async function sweepBlankSessions(ctx, settings, signal) {
         report.skipped.push({ sessionId, reason: 'its log is too large to be a placeholder' })
         continue
       }
-      const loaded = await query.load(sessionId, signal)
+      const loaded = await readLog(sessionId)
       if (loaded.events.some((event) => event.type === 'turn/start')) {
         report.skipped.push({ sessionId, reason: 'it had a turn' })
         continue
@@ -864,6 +947,11 @@ async function sweepBlankSessions(ctx, settings, signal) {
   }
   if (report.deleted.length > 0) {
     ctx.logger?.info?.(`archive-purge: removed ${String(report.deleted.length)} blank session placeholder(s)`)
+  } else if (report.examined > 0) {
+    ctx.logger?.info?.(`archive-purge: blank sweep left ${String(report.skipped.length)} of ${String(report.examined)} candidate placeholder(s) alone`)
+  }
+  if (report.failed.length > 0) {
+    ctx.logger?.warn?.(`archive-purge: blank sweep could not remove ${String(report.failed.length)} placeholder(s)`)
   }
   return report
 }
@@ -967,15 +1055,44 @@ function scheduleStagedPurges(ctx, settings) {
       } catch (error) {
         ctx.logger?.warn?.(`archive-purge: leftover subagent sweep failed: ${messageOf(error)}`)
       }
-      try {
-        await sweepBlankSessions(ctx, settings, undefined)
-      } catch (error) {
-        ctx.logger?.warn?.(`archive-purge: blank-session sweep failed: ${messageOf(error)}`)
-      }
     })
     .catch((error) => {
       ctx.logger?.warn?.(`archive-purge: staged purge pass failed: ${messageOf(error)}`)
     })
+}
+
+/**
+ * Run the opening blank sweep once the query service exists.
+ *
+ * The pass cannot decide anything without `sessionQuery` — that is what proves a log
+ * never started a turn — and a service read with `ctx.get` during `apply` may not be
+ * registered yet (it is provided by another plugin row). Scheduling through
+ * `ctx.inject` makes the sweep wait for readiness instead of silently doing nothing,
+ * which is exactly how the first automatic pass used to disappear.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ */
+function scheduleBlankSweepWhenReady(ctx, settings) {
+  if (settings.sweepBlanks !== true) return
+  const run = () => {
+    Promise.resolve()
+      .then(() => sweepBlankSessions(ctx, settings, undefined))
+      .catch((error) => {
+        ctx.logger?.warn?.(`archive-purge: blank-session sweep failed: ${messageOf(error)}`)
+      })
+  }
+  if (typeof ctx.inject !== 'function') {
+    run()
+    return
+  }
+  // Keep the resolved instance: `ctx.get` is a strict lookup that answers undefined
+  // while the provider fiber has not finished loading, and every later pass (event
+  // sweep, cleanup dialog) should reuse the one the fiber actually injected.
+  ctx.inject(['sessionQuery'], (sub) => {
+    if (sub?.sessionQuery !== undefined) settings.sessionQueryService = sub.sessionQuery
+    run()
+  })
 }
 
 /**
