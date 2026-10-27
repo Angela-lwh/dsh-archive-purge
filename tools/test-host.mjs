@@ -18,6 +18,7 @@
  * Usage: node tools/test-host.mjs
  */
 import { strict as assert } from 'node:assert'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -66,6 +67,12 @@ function scenario() {
     servicesReady: true,
     /** The `@` reference resolver the filter wraps, when a scenario installs one. */
     resolver: undefined,
+    /** Spill backend root, when a scenario installs a spill store. */
+    spillRoot: undefined,
+    /** Fake cache table; its `deleted` array records what went through the write chain. */
+    cacheTable: undefined,
+    /** Makes `requireTable()` throw, to exercise the stored-file fallback. */
+    cacheTableThrows: false,
     /** Session ids the Host holds in its in-memory store. */
     loaded: new Set(),
     /** Session id -> Agent status, for ids the Host holds as live Agents. */
@@ -190,7 +197,20 @@ function ctxFor(world) {
             const values = world.projections[header.id]
             return values === undefined ? undefined : { values }
           },
+          requireTable: () => {
+            if (world.cacheTableThrows) throw new Error('cache table unavailable')
+            if (world.cacheTable === undefined) return undefined
+            return {
+              delete: async (sessionId) => {
+                world.cacheTable.deleted.push(sessionId)
+                await rm(join(world.root, 'storages', 'session_projcache', 'sessions', `${sessionId}.json`), { force: true })
+              },
+            }
+          },
         }
+      }
+      if (service === 'spillStore') {
+        return world.spillRoot === undefined ? undefined : { root: world.spillRoot }
       }
       if (service === 'sessionProjections') {
         return {
@@ -632,6 +652,77 @@ function cacheRecordPath(world, sessionId) {
   const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0, harnessHome: world.root })
   assert.deepEqual(report.deleted, [sessionId])
   assert.equal(existsSync(cacheRecordPath(world, sessionId)), false, 'the deleted Session leaves no cache record behind')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The cache record goes through the cache's own table when the Host exposes one:
+  // memory and disk change together, and the stored file is the fake table's own doing.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cache-'))
+  world.cacheTable = { deleted: [] }
+  const sessionId = 'session-blank'
+  await seedBlank(world, '--D-Project-demo--', sessionId)
+  await seedCacheRecord(world, sessionId)
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0, harnessHome: world.root })
+  assert.deepEqual(report.deleted, [sessionId])
+  assert.deepEqual(world.cacheTable.deleted, [sessionId], 'the deletion went through the cache table')
+  assert.equal(existsSync(cacheRecordPath(world, sessionId)), false)
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A Host whose cache cannot expose its table still gets the stored file removed.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cache-'))
+  world.cacheTableThrows = true
+  const sessionId = 'session-blank'
+  await seedBlank(world, '--D-Project-demo--', sessionId)
+  await seedCacheRecord(world, sessionId)
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0, harnessHome: world.root })
+  assert.deepEqual(report.deleted, [sessionId])
+  assert.equal(existsSync(cacheRecordPath(world, sessionId)), false, 'the stored-file fallback removed it')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The orphan sweep uses the same write chain, and still cleans a record the table
+  // does not know about.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cache-'))
+  world.cacheTable = { deleted: [] }
+  await seedCacheRecord(world, 'session-orphan')
+
+  const report = await __test.sweepProjectionCache(ctxFor(world), { sweepCache: true, cacheMinAgeMs: 0, harnessHome: world.root })
+  assert.deepEqual(report.deleted, ['session-orphan'])
+  assert.deepEqual(world.cacheTable.deleted, ['session-orphan'])
+  assert.equal(existsSync(cacheRecordPath(world, 'session-orphan')), false)
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A deleted Session's spill overflow goes with it, and nothing else does. The
+  // directory name is the backend's scheme: `session-` plus a hash prefix.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-spill-'))
+  world.spillRoot = join(world.root, 'spill')
+  const sessionId = 'session-blank'
+  await seedBlank(world, '--D-Project-demo--', sessionId)
+  const mine = __test.spillSessionDirectory(world.spillRoot, sessionId)
+  const other = __test.spillSessionDirectory(world.spillRoot, 'session-other')
+  await mkdir(mine, { recursive: true })
+  await writeFile(join(mine, 'blob.txt'), 'x')
+  await mkdir(other, { recursive: true })
+  await writeFile(join(other, 'blob.txt'), 'y')
+  assert.equal(createHash('sha256').update(sessionId).digest('hex').slice(0, 12), mine.slice(-12),
+    'the directory name is the hash prefix the spill backend uses')
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0, harnessHome: world.root })
+  assert.deepEqual(report.deleted, [sessionId])
+  assert.equal(existsSync(mine), false, 'the deleted Session leaves no spill directory')
+  assert.equal(existsSync(join(other, 'blob.txt')), true, 'another Session keeps its overflow')
   await rm(world.root, { recursive: true, force: true })
 }
 

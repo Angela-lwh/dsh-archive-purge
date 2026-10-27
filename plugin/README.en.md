@@ -20,7 +20,7 @@ Restart DSH afterwards: the Host half loads at startup, and an archived session'
 
 - Only **archived** sessions can be deleted; archive one first.
 - Refused while the session, or one of its subagent sessions, has work in progress; a session the Host still holds is staged and finished at the next start or from "Finish pending deletions".
-- Deletion is irreversible and there is no trash; attachments (shared across sessions) are untouched. A deleted Session's projection-cache record goes with it, and records left by earlier deletions are swept too (`sweepCache: false` turns that off).
+- Deletion is irreversible and there is no trash; attachments (shared across sessions) are untouched. A deleted Session's spill overflow and projection-cache record go with it, and cache records left by earlier deletions are swept too (`sweepCache: false` turns that off).
 - Subagent sessions are deleted with their parent; leftovers whose parent is already gone are swept at startup or on the next deletion.
 - Blank sessions that never sent a message (the sidebar hides them) are removed automatically on Host start, on a new conversation, or on any deletion, and no longer show up in `@`; `sweepBlanks` / `filterBlankReferences` switch each part off.
 - Only this machine's `$DSH_HOME/sessions` is touched, and no backup is kept; back it up first if you need a way back.

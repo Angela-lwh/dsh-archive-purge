@@ -47,6 +47,7 @@
  * @module @angela_lwh/dsh-archive-purge
  */
 import { open, readdir, rm, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 
@@ -58,7 +59,7 @@ export const name = 'archive-purge'
  * empty store and the deferred purge looks idle, and a misread lineage either
  * strands a subagent log or deletes a fork).
  */
-export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents, sweepProjectionCache, staleProjectionCacheRecords, dropProjectionCacheRecord, blankCandidates, sweepBlankSessions, runHygienePass }
+export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents, sweepProjectionCache, staleProjectionCacheRecords, dropProjectionCacheRecord, dropSpillDirectory, spillSessionDirectory, blankCandidates, sweepBlankSessions, runHygienePass }
 /**
  * Hard service requirements. An array (not the older `{required, optional}`
  * object shape, which the vendored Cordis reads as services literally named
@@ -299,6 +300,7 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
     }
     await retireMetadata(ctx, registry, sessionId)
     await dropProjectionCacheRecord(ctx, settings, sessionId)
+    await dropSpillDirectory(ctx, sessionId)
     const swept = await sweepOrphanSubagents(ctx, settings, signal)
     return { sessionId, deleted: false, reason: 'no-stored-log', descendants: [], orphansSwept: swept.deleted }
   }
@@ -377,6 +379,7 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
   }
   for (const plan of plans) await retireMetadata(ctx, registry, plan.sessionId)
   for (const plan of plans) await dropProjectionCacheRecord(ctx, settings, plan.sessionId)
+  for (const plan of plans) await dropSpillDirectory(ctx, plan.sessionId)
   for (const plan of plans) {
     // Display-only removal on the forwarded-event allowlist: every connected GUI
     // drops the row through `handleSessionRemoved` without a reload or restart.
@@ -623,16 +626,48 @@ async function isProjectionCacheRecord(path) {
 }
 
 /**
+ * The cache's own storage table, when the service exposes it.
+ *
+ * Deleting through the table keeps the in-memory rows and the stored files in step
+ * and lets the domain track the write; deleting the file directly leaves the row
+ * behind (harmless for a deleted Session, but two sources of truth). The accessor is
+ * not part of a published contract, so every caller must fall back to the file.
+ *
+ * @param ctx - Host context.
+ * @returns the table, or undefined when this Host cannot expose it.
+ */
+function projectionCacheTable(ctx) {
+  try {
+    const cache = ctx.get('sessionProjectionCache')
+    if (typeof cache?.requireTable !== 'function') return undefined
+    const table = cache.requireTable()
+    return typeof table?.delete === 'function' ? table : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Drop the projection-cache record of one Session this plugin just deleted.
  *
- * Best effort by design: the Session is already gone, and a cache record that
- * survives only costs a cold projection on a Session nobody can open.
+ * Through the cache's table when possible, by stored file otherwise. Best effort by
+ * design: the Session is already gone, and a cache record that survives only costs a
+ * cold projection on a Session nobody can open.
  *
  * @param ctx - Host context.
  * @param settings - resolved plugin config.
  * @param sessionId - the Session whose record is stale.
  */
 async function dropProjectionCacheRecord(ctx, settings, sessionId) {
+  const table = projectionCacheTable(ctx)
+  if (table !== undefined) {
+    try {
+      await table.delete(sessionId)
+      return
+    } catch (error) {
+      ctx.logger?.warn?.(`archive-purge: projection-cache table could not drop ${sessionId} (${messageOf(error)}); removing its file instead`)
+    }
+  }
   try {
     const directory = await projectionCacheDirectory(ctx, settings)
     if (directory === undefined) return
@@ -641,6 +676,43 @@ async function dropProjectionCacheRecord(ctx, settings, sessionId) {
     await rm(path, { force: true })
   } catch (error) {
     ctx.logger?.warn?.(`archive-purge: could not drop the projection-cache record of ${sessionId}: ${messageOf(error)}`)
+  }
+}
+
+/**
+ * One Session's spill directory: `<spillRoot>/session-<sha256(id)[0..12]>`.
+ *
+ * Spill is where the Session log keeps oversized tool output instead of inlining it,
+ * and the backend names the directory by a hash of the Session id — the same scheme
+ * `dsh-spill-local`'s own `sessionDir()` uses, so a deleted Session's overflow belongs
+ * to exactly one directory this plugin can compute.
+ *
+ * @param root - the spill backend's root.
+ * @param sessionId - the Session whose directory is wanted.
+ * @returns the absolute session spill directory.
+ */
+function spillSessionDirectory(root, sessionId) {
+  return join(root, `session-${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}`)
+}
+
+/**
+ * Drop the spill directory of one Session this plugin just deleted.
+ *
+ * Best effort, and only the one directory: the root is process-private by default (a
+ * temporary directory the backend sweeps at the next start), but a configured durable
+ * root would otherwise keep the overflow of a conversation nobody can open.
+ *
+ * @param ctx - Host context.
+ * @param sessionId - the Session whose overflow is stale.
+ */
+async function dropSpillDirectory(ctx, sessionId) {
+  try {
+    const spill = ctx.get('spillStore')
+    const root = typeof spill?.root === 'string' && spill.root !== '' ? spill.root : undefined
+    if (root === undefined) return
+    await rm(spillSessionDirectory(root, sessionId), { recursive: true, force: true })
+  } catch (error) {
+    ctx.logger?.warn?.(`archive-purge: could not drop the spill directory of ${sessionId}: ${messageOf(error)}`)
   }
 }
 
@@ -707,10 +779,22 @@ async function sweepProjectionCache(ctx, settings, signal) {
     return report
   }
   report.examined = stale.records.length
+  const table = projectionCacheTable(ctx)
   for (const record of stale.records) {
     signal?.throwIfAborted()
     try {
-      await rm(record.path, { force: true })
+      // Through the cache's own table first (memory and disk stay in step); the file is
+      // the fallback for a Host that does not expose it.
+      if (table !== undefined) {
+        try {
+          await table.delete(record.sessionId)
+        } catch {
+          // Fall through to the stored file.
+        }
+      }
+      if ((await stat(record.path).catch(() => undefined)) !== undefined) {
+        await rm(record.path, { force: true })
+      }
       report.deleted.push(record.sessionId)
     } catch (error) {
       report.failed.push({ sessionId: record.sessionId, code: error?.code ?? 'archive-purge/failed', message: messageOf(error) })
@@ -904,6 +988,7 @@ async function sweepOrphanSubagents(ctx, settings, signal) {
       }
       await retireMetadata(ctx, ctx.workspaceRegistry, sessionId)
       await dropProjectionCacheRecord(ctx, settings, sessionId)
+      await dropSpillDirectory(ctx, sessionId)
       ctx.emit('api-session/removed', sessionId)
       report.deleted.push(sessionId)
     } catch (error) {
@@ -1116,6 +1201,7 @@ async function sweepBlankSessions(ctx, settings, signal) {
       await rm(directory, { recursive: true, force: true, maxRetries: 3 })
       await retireMetadata(ctx, ctx.workspaceRegistry, sessionId)
       await dropProjectionCacheRecord(ctx, settings, sessionId)
+      await dropSpillDirectory(ctx, sessionId)
       ctx.emit('api-session/removed', sessionId)
       report.deleted.push(sessionId)
     } catch (error) {
