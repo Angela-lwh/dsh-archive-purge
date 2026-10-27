@@ -377,7 +377,7 @@ assert.equal(pendingElement.props.request.seq, 1)
 assert.equal(pendingElement.props.t, t)
 
 // The pending screen's own copy, and the code a missing store reports.
-for (const key of ['pending.title', 'pending.lead', 'pending.count', 'pending.orphans', 'pending.orphansDone', 'pending.blanks', 'pending.blanksDone', 'pending.blanksHeld', 'pending.blanksFailed', 'pending.none', 'pending.retry', 'pending.still', 'menu.retryPending']) {
+for (const key of ['pending.title', 'pending.lead', 'pending.count', 'pending.orphans', 'pending.orphansDone', 'pending.blanks', 'pending.blanksDone', 'pending.blanksHeld', 'pending.blanksFailed', 'pending.cache', 'pending.cacheDone', 'pending.cacheFailed', 'pending.none', 'pending.retry', 'pending.still', 'menu.retryPending']) {
   assert.equal(typeof zh[key], 'string', `zh must define ${key}`)
   assert.equal(typeof en[key], 'string', `en must define ${key}`)
 }

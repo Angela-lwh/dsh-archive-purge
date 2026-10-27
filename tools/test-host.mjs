@@ -19,7 +19,7 @@
  */
 import { strict as assert } from 'node:assert'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -106,7 +106,10 @@ function launch(world, config = {}) {
     world.pendingFile = join(tmpdir(), `dsh-archive-purge-pending-${String(Date.now())}-${String(Math.trunc(Math.random() * 1e6))}.json`)
   }
   if (world.root === undefined) world.root = join(tmpdir(), `dsh-archive-purge-root-${String(Math.trunc(Math.random() * 1e9))}`)
-  apply(ctxFor(world), { pendingFile: world.pendingFile, ...config })
+  // The process environment usually carries the developer's real `DSH_HOME`; without
+  // this pin a pass that resolves a home (the projection-cache sweep) would run against
+  // the machine's own store instead of the scenario's temporary one.
+  apply(ctxFor(world), { pendingFile: world.pendingFile, harnessHome: world.root, ...config })
   return world
 }
 
@@ -173,6 +176,10 @@ function ctxFor(world) {
           get: (id) => {
             if (world.releaseAt !== 0 && Date.now() >= world.releaseAt) return undefined
             return world.loaded.has(id) ? { id } : undefined
+          },
+          list: () => {
+            const released = world.releaseAt !== 0 && Date.now() >= world.releaseAt
+            return released ? [] : [...world.loaded].map((id) => ({ id }))
           },
         }
       }
@@ -573,6 +580,112 @@ async function leftoverWorld() {
   assert.deepEqual(world.unarchived, ['session-missing'], 'a ghost id is still retired')
 }
 
+// ---- projection-cache records: the residue a deletion used to leave behind ------
+
+/** One stored projection-cache record under the world's Harness home. */
+async function seedCacheRecord(world, sessionId, { ageMs = 60 * 60 * 1000, text } = {}) {
+  const directory = join(world.root, 'storages', 'session_projcache', 'sessions')
+  await mkdir(directory, { recursive: true })
+  const path = join(directory, `${sessionId}.json`)
+  await writeFile(path, text ?? JSON.stringify({ version: 7, record: { identity: { formatVersion: 4, createdAt: 1, isSeeded: false }, rows: {} } }))
+  const when = new Date(Date.now() - ageMs)
+  await utimes(path, when, when)
+  return path
+}
+
+/** Where one Session's cache record lives under the world's Harness home. */
+function cacheRecordPath(world, sessionId) {
+  return join(world.root, 'storages', 'session_projcache', 'sessions', `${sessionId}.json`)
+}
+
+{
+  // Only records whose Session exists nowhere are stale: a stored Session and a
+  // live-only one keep theirs, an unreadable file is left alone, and a record written
+  // a moment ago is still inside the quiet window.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cache-'))
+  await seedBlank(world, '--D-Project-demo--', 'session-stored')
+  world.loaded.add('session-live-only')
+  await seedCacheRecord(world, 'session-stored')
+  await seedCacheRecord(world, 'session-live-only')
+  await seedCacheRecord(world, 'session-orphan')
+  await seedCacheRecord(world, 'session-fresh-orphan', { ageMs: 0 })
+  await seedCacheRecord(world, 'junk', { text: 'not json' })
+
+  const report = await __test.sweepProjectionCache(ctxFor(world), { sweepCache: true, cacheMinAgeMs: 10 * 60 * 1000, harnessHome: world.root })
+  assert.deepEqual(report.deleted, ['session-orphan'], JSON.stringify(report))
+  assert.equal(existsSync(cacheRecordPath(world, 'session-orphan')), false, 'the orphaned record is gone')
+  for (const id of ['session-stored', 'session-live-only', 'session-fresh-orphan', 'junk']) {
+    assert.equal(existsSync(cacheRecordPath(world, id)), true, `${id} must survive`)
+  }
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // Deleting a Session drops its own record immediately, in the same pass.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cache-'))
+  const sessionId = 'session-blank'
+  await seedBlank(world, '--D-Project-demo--', sessionId)
+  await seedCacheRecord(world, sessionId)
+
+  const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: true, blankMinAgeMs: 0, harnessHome: world.root })
+  assert.deepEqual(report.deleted, [sessionId])
+  assert.equal(existsSync(cacheRecordPath(world, sessionId)), false, 'the deleted Session leaves no cache record behind')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The preview names the stale records, and a disabled sweep advertises none.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cache-'))
+  world.pendingFile = join(world.root, 'pending.json')
+  writeFileSync(world.pendingFile, JSON.stringify({ version: 1, sessionIds: [] }), 'utf8')
+  await seedCacheRecord(world, 'session-orphan')
+
+  const preview = await __test.listPendingPurge(ctxFor(world), {
+    sweepBlanks: false,
+    sweepCache: true,
+    cacheMinAgeMs: 0,
+    pendingFile: world.pendingFile,
+    harnessHome: world.root,
+  })
+  assert.deepEqual(preview.staleCacheRecordIds, ['session-orphan'])
+  const off = await __test.listPendingPurge(ctxFor(world), {
+    sweepBlanks: false,
+    sweepCache: false,
+    pendingFile: world.pendingFile,
+    harnessHome: world.root,
+  })
+  assert.deepEqual(off.staleCacheRecordIds, [], 'a disabled cache sweep advertises nothing')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The cleanup dialog's pass reports the cache sweep, and the record is gone after it.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cache-'))
+  world.pendingFile = join(world.root, 'pending.json')
+  writeFileSync(world.pendingFile, JSON.stringify({ version: 1, sessionIds: [] }), 'utf8')
+  launch(world)
+  await seedCacheRecord(world, 'session-orphan')
+  const retried = await world.request({ action: 'retryPending' })
+  assert.deepEqual(retried.body.value.cache.deleted, ['session-orphan'])
+  assert.equal(existsSync(cacheRecordPath(world, 'session-orphan')), false)
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // The opening pass covers the cache too, through the home pinned at activation.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-cache-'))
+  await seedCacheRecord(world, 'session-orphan')
+  launch(world)
+  await waitFor(() => !existsSync(cacheRecordPath(world, 'session-orphan')))
+  assert.equal(existsSync(cacheRecordPath(world, 'session-orphan')), false, 'the startup pass drops the orphaned record')
+  await rm(world.root, { recursive: true, force: true })
+}
+
 // ---- blank placeholders: the sessions the sidebar hides but @ lists ------------
 
 /** One stored Session directory plus the metadata a blank placeholder carries. */
@@ -823,14 +936,14 @@ async function seedBlank(world, projectSlug, sessionId, { createdAt = Date.now()
 }
 
 {
-  // `sweepBlanks: false` is a hard stop for both the pass and the event wiring.
+  // `sweepBlanks` / `sweepCache` false are hard stops for the pass and the wiring.
   const world = scenario()
   world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-blank-'))
   const projectSlug = '--D-Project-demo--'
   const sessionId = 'session-blank'
   await seedBlank(world, projectSlug, sessionId)
-  launch(world, { sweepBlanks: false })
-  assert.deepEqual(world.listeners, [], 'a disabled sweep registers no trigger')
+  launch(world, { sweepBlanks: false, sweepCache: false })
+  assert.deepEqual(world.listeners, [], 'disabled sweeps register no trigger')
   const report = await __test.sweepBlankSessions(ctxFor(world), { sweepBlanks: false, blankMinAgeMs: 0 })
   assert.deepEqual(report, { examined: 0, deleted: [], skipped: [], failed: [] })
   assert.equal(existsSync(join(world.root, projectSlug, sessionId)), true)

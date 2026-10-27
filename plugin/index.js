@@ -46,7 +46,7 @@
  *
  * @module @angela_lwh/dsh-archive-purge
  */
-import { readdir, rm, stat } from 'node:fs/promises'
+import { open, readdir, rm, stat } from 'node:fs/promises'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 
@@ -58,7 +58,7 @@ export const name = 'archive-purge'
  * empty store and the deferred purge looks idle, and a misread lineage either
  * strands a subagent log or deletes a fork).
  */
-export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents, blankCandidates, sweepBlankSessions }
+export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents, sweepProjectionCache, staleProjectionCacheRecords, dropProjectionCacheRecord, blankCandidates, sweepBlankSessions, runHygienePass }
 /**
  * Hard service requirements. An array (not the older `{required, optional}`
  * object shape, which the vendored Cordis reads as services literally named
@@ -170,18 +170,21 @@ const PERMANENT_REFUSALS = new Set([
 /**
  * Register the deletion route, then finish any purge the previous Host could not.
  * @param ctx - Host plugin context carrying Connection, the Workspace registry, and persistence.
- * @param config - optional `{ sessionsRoot, releaseWaitMs, pendingFile, stageWhenLoaded, releaseLoaded, sweepOrphans, sweepBlanks, blankMinAgeMs, filterBlankReferences }` overrides.
+ * @param config - optional `{ sessionsRoot, releaseWaitMs, pendingFile, harnessHome, stageWhenLoaded, releaseLoaded, sweepOrphans, sweepBlanks, blankMinAgeMs, sweepCache, cacheMinAgeMs, filterBlankReferences }` overrides.
  */
 export function apply(ctx, config = {}) {
   const settings = {
     sessionsRoot: readOptionalPath(config?.sessionsRoot),
     releaseWaitMs: readWaitBudget(config?.releaseWaitMs),
     pendingFile: readOptionalPath(config?.pendingFile),
+    harnessHome: readOptionalPath(config?.harnessHome),
     stageWhenLoaded: config?.stageWhenLoaded !== false,
     releaseLoaded: config?.releaseLoaded !== false,
     sweepOrphans: config?.sweepOrphans !== false,
     sweepBlanks: config?.sweepBlanks !== false,
     blankMinAgeMs: readNonNegativeMs(config?.blankMinAgeMs, DEFAULT_BLANK_MIN_AGE_MS),
+    sweepCache: config?.sweepCache !== false,
+    cacheMinAgeMs: readNonNegativeMs(config?.cacheMinAgeMs, DEFAULT_BLANK_MIN_AGE_MS),
     filterBlankReferences: config?.filterBlankReferences !== false,
   }
   ctx.connection.fetch.register({
@@ -191,9 +194,9 @@ export function apply(ctx, config = {}) {
     fetch: (request) => handleDeleteRequest(ctx, settings, request),
   })
   installBlankReferenceFilter(ctx, settings)
-  watchBlankSessions(ctx, settings)
+  watchStoreHygiene(ctx, settings)
   scheduleStagedPurges(ctx, settings)
-  scheduleBlankSweepWhenReady(ctx, settings)
+  scheduleHygieneWhenReady(ctx, settings)
 }
 
 /**
@@ -295,6 +298,7 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
       return { sessionId, deleted: false, reason: 'already-purged', descendants: [], orphansSwept: [] }
     }
     await retireMetadata(ctx, registry, sessionId)
+    await dropProjectionCacheRecord(ctx, settings, sessionId)
     const swept = await sweepOrphanSubagents(ctx, settings, signal)
     return { sessionId, deleted: false, reason: 'no-stored-log', descendants: [], orphansSwept: swept.deleted }
   }
@@ -372,6 +376,7 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
     await rm(plan.directory, { recursive: true, force: true, maxRetries: 3 })
   }
   for (const plan of plans) await retireMetadata(ctx, registry, plan.sessionId)
+  for (const plan of plans) await dropProjectionCacheRecord(ctx, settings, plan.sessionId)
   for (const plan of plans) {
     // Display-only removal on the forwarded-event allowlist: every connected GUI
     // drops the row through `handleSessionRemoved` without a reload or restart.
@@ -380,9 +385,9 @@ async function purgeArchivedSession(ctx, settings, sessionId, signal) {
   // Leftovers from deletions this plugin performed before it cascaded: their parent
   // is already gone, so nothing can ever browse or open them again.
   const swept = await sweepOrphanSubagents(ctx, settings, signal)
-  // Abandoned blank placeholders are collected on the same occasion, so a deletion
-  // leaves the store as tidy as it found it.
-  await sweepBlankSessions(ctx, settings, signal)
+  // Abandoned blank placeholders and orphaned cache records are collected on the same
+  // occasion, so a deletion leaves the store as tidy as it found it.
+  await runHygienePass(ctx, settings, signal)
   return {
     sessionId,
     deleted: true,
@@ -545,6 +550,176 @@ async function retireMetadata(ctx, registry, sessionId) {
   } catch (error) {
     ctx.logger?.warn?.(`archive-purge: could not clear the archive mark of ${sessionId}: ${messageOf(error)}`)
   }
+}
+
+/**
+ * `<home>/storages/session_projcache/sessions` — the projection cache's per-record
+ * layout, one `<sessionId>.json` file per Session.
+ *
+ * The cache service exposes reads and writes but no delete, and the layout is a
+ * documented per-record directory (`a write rewrites one record instead`), so a
+ * record whose Session is gone is removed as a file. Its in-memory row is left
+ * behind on purpose: nothing ever writes it again (a `put` needs a live Session),
+ * and every read is identity-checked, so a stale row can never answer for another
+ * lifecycle.
+ */
+const CACHE_RECORD_DIR = 'storages/session_projcache/sessions'
+/** Suffix of one stored projection-cache record. */
+const CACHE_RECORD_SUFFIX = '.json'
+
+/**
+ * Harness home, remembered once it resolves.
+ *
+ * Every path this plugin owns lives under it, and the original resolution needs at
+ * least one stored artifact — so without a remembered home a store emptied by this
+ * plugin could no longer locate its own deferred-purge file.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config, used as the memo.
+ * @returns the absolute home, or undefined when nothing resolves.
+ */
+async function harnessHomeFor(ctx, settings) {
+  if (settings.harnessHome !== undefined) return settings.harnessHome
+  const home = await resolveHarnessHome(ctx, settings, undefined)
+  if (home !== undefined) settings.harnessHome = home
+  return home
+}
+
+/**
+ * Absolute path of the projection-cache record directory, when it can be derived.
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @returns the directory path, or undefined.
+ */
+async function projectionCacheDirectory(ctx, settings) {
+  const home = await harnessHomeFor(ctx, settings)
+  return home === undefined ? undefined : join(home, ...CACHE_RECORD_DIR.split('/'))
+}
+
+/**
+ * Whether a file is one of this cache's records, judged by its stored shape
+ * (`{ version, record: { identity, rows } }`). Anything else is left alone: a shape
+ * this plugin does not recognise is never deleted on a filename's word.
+ *
+ * @param path - absolute record path.
+ * @returns true when the file parses as a cache record.
+ */
+async function isProjectionCacheRecord(path) {
+  // A bounded read, not a parse: the directory belongs to the cache, and one of these
+  // records can be a hundred kilobytes, so the pass must not walk them all.
+  try {
+    const handle = await open(path, 'r')
+    try {
+      const buffer = Buffer.alloc(4096)
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+      const head = buffer.subarray(0, bytesRead).toString('utf8')
+      return head.includes('"version"') && head.includes('"record"') && head.includes('"identity"')
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Drop the projection-cache record of one Session this plugin just deleted.
+ *
+ * Best effort by design: the Session is already gone, and a cache record that
+ * survives only costs a cold projection on a Session nobody can open.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param sessionId - the Session whose record is stale.
+ */
+async function dropProjectionCacheRecord(ctx, settings, sessionId) {
+  try {
+    const directory = await projectionCacheDirectory(ctx, settings)
+    if (directory === undefined) return
+    const path = join(directory, `${sessionId}${CACHE_RECORD_SUFFIX}`)
+    if (!(await isProjectionCacheRecord(path))) return
+    await rm(path, { force: true })
+  } catch (error) {
+    ctx.logger?.warn?.(`archive-purge: could not drop the projection-cache record of ${sessionId}: ${messageOf(error)}`)
+  }
+}
+
+/**
+ * Projection-cache records whose Session no longer exists anywhere.
+ *
+ * A record is stale only when the id is absent from the stored index *and* from the
+ * live registry, its file still parses as a cache record, and it has been quiet for
+ * `cacheMinAgeMs` — a Session created a moment ago may not have written its log yet.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @returns `{ directory, records }`, or undefined when nothing can be listed.
+ */
+async function staleProjectionCacheRecords(ctx, settings) {
+  const index = await collectSessionIndex(ctx)
+  if (index === undefined) return undefined
+  const directory = await projectionCacheDirectory(ctx, settings)
+  if (directory === undefined) return undefined
+  let entries
+  try {
+    entries = await readdir(directory, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { directory, records: [] }
+    ctx.logger?.warn?.(`archive-purge: could not list the projection cache: ${messageOf(error)}`)
+    return undefined
+  }
+  const live = new Set()
+  for (const session of safeList(ctx.get('sessions'))) if (typeof session?.id === 'string') live.add(session.id)
+  const now = Date.now()
+  const records = []
+  for (const entry of entries) {
+    if (entry.isFile() !== true || !entry.name.endsWith(CACHE_RECORD_SUFFIX)) continue
+    const sessionId = entry.name.slice(0, -CACHE_RECORD_SUFFIX.length)
+    if (sessionId === '' || index.byId.has(sessionId) || live.has(sessionId)) continue
+    const path = join(directory, entry.name)
+    try {
+      const stats = await stat(path)
+      if (now - stats.mtimeMs < settings.cacheMinAgeMs) continue
+      if (!(await isProjectionCacheRecord(path))) continue
+      records.push({ sessionId, path })
+    } catch {
+      // An unreadable record is left alone; it is not worth failing the pass over.
+    }
+  }
+  return { directory, records }
+}
+
+/**
+ * Delete projection-cache records left behind by Sessions this plugin (or an older
+ * install) already removed. Records of existing Sessions are never touched.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param signal - caller cancellation.
+ * @returns what was examined, deleted, skipped, and failed.
+ */
+async function sweepProjectionCache(ctx, settings, signal) {
+  const report = { examined: 0, deleted: [], skipped: [], failed: [] }
+  if (settings.sweepCache !== true) return report
+  const stale = await staleProjectionCacheRecords(ctx, settings)
+  if (stale === undefined) {
+    report.reason = 'no-cache-listing'
+    return report
+  }
+  report.examined = stale.records.length
+  for (const record of stale.records) {
+    signal?.throwIfAborted()
+    try {
+      await rm(record.path, { force: true })
+      report.deleted.push(record.sessionId)
+    } catch (error) {
+      report.failed.push({ sessionId: record.sessionId, code: error?.code ?? 'archive-purge/failed', message: messageOf(error) })
+    }
+  }
+  if (report.deleted.length > 0) {
+    ctx.logger?.info?.(`archive-purge: removed ${String(report.deleted.length)} orphaned projection-cache record(s)`)
+  }
+  return report
 }
 
 /**
@@ -728,6 +903,7 @@ async function sweepOrphanSubagents(ctx, settings, signal) {
         await rm(directory, { recursive: true, force: true, maxRetries: 3 })
       }
       await retireMetadata(ctx, ctx.workspaceRegistry, sessionId)
+      await dropProjectionCacheRecord(ctx, settings, sessionId)
       ctx.emit('api-session/removed', sessionId)
       report.deleted.push(sessionId)
     } catch (error) {
@@ -939,6 +1115,7 @@ async function sweepBlankSessions(ctx, settings, signal) {
       await assertPurgeTarget(directory, sessionId)
       await rm(directory, { recursive: true, force: true, maxRetries: 3 })
       await retireMetadata(ctx, ctx.workspaceRegistry, sessionId)
+      await dropProjectionCacheRecord(ctx, settings, sessionId)
       ctx.emit('api-session/removed', sessionId)
       report.deleted.push(sessionId)
     } catch (error) {
@@ -967,8 +1144,9 @@ async function sweepBlankSessions(ctx, settings, signal) {
  * @param ctx - Host context.
  * @param settings - resolved plugin config.
  */
-function watchBlankSessions(ctx, settings) {
-  if (settings.sweepBlanks !== true || typeof ctx.on !== 'function') return
+function watchStoreHygiene(ctx, settings) {
+  if (typeof ctx.on !== 'function') return
+  if (settings.sweepBlanks !== true && settings.sweepCache !== true) return
   let running = false
   let dirty = false
   const run = () => {
@@ -978,9 +1156,9 @@ function watchBlankSessions(ctx, settings) {
     }
     running = true
     Promise.resolve()
-      .then(() => sweepBlankSessions(ctx, settings, undefined))
+      .then(() => runHygienePass(ctx, settings, undefined))
       .catch((error) => {
-        ctx.logger?.warn?.(`archive-purge: blank-session sweep failed: ${messageOf(error)}`)
+        ctx.logger?.warn?.(`archive-purge: store hygiene pass failed: ${messageOf(error)}`)
       })
       .finally(() => {
         running = false
@@ -1062,24 +1240,38 @@ function scheduleStagedPurges(ctx, settings) {
 }
 
 /**
- * Run the opening blank sweep once the query service exists.
+ * One hygiene pass: abandoned blank placeholders, then projection-cache records whose
+ * Session is gone. Both are the residue of deletions, so they are collected together.
  *
- * The pass cannot decide anything without `sessionQuery` — that is what proves a log
- * never started a turn — and a service read with `ctx.get` during `apply` may not be
- * registered yet (it is provided by another plugin row). Scheduling through
- * `ctx.inject` makes the sweep wait for readiness instead of silently doing nothing,
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param signal - caller cancellation.
+ * @returns both reports.
+ */
+async function runHygienePass(ctx, settings, signal) {
+  const blanks = await sweepBlankSessions(ctx, settings, signal)
+  const cache = await sweepProjectionCache(ctx, settings, signal)
+  return { blanks, cache }
+}
+
+/**
+ * Run the opening hygiene pass once the query service exists.
+ *
+ * The blank half cannot decide anything without `sessionQuery` — that is what proves
+ * a log never started a turn — and a service read with `ctx.get` during `apply` may
+ * not be registered yet (it is provided by another plugin row). Scheduling through
+ * `ctx.inject` makes the pass wait for readiness instead of silently doing nothing,
  * which is exactly how the first automatic pass used to disappear.
  *
  * @param ctx - Host context.
  * @param settings - resolved plugin config.
  */
-function scheduleBlankSweepWhenReady(ctx, settings) {
-  if (settings.sweepBlanks !== true) return
+function scheduleHygieneWhenReady(ctx, settings) {
   const run = () => {
     Promise.resolve()
-      .then(() => sweepBlankSessions(ctx, settings, undefined))
+      .then(() => runHygienePass(ctx, settings, undefined))
       .catch((error) => {
-        ctx.logger?.warn?.(`archive-purge: blank-session sweep failed: ${messageOf(error)}`)
+        ctx.logger?.warn?.(`archive-purge: store hygiene pass failed: ${messageOf(error)}`)
       })
   }
   if (typeof ctx.inject !== 'function') {
@@ -1178,11 +1370,13 @@ async function listPendingPurge(ctx, settings) {
       confirmedOnly: true,
     })
     : []
+  const stale = settings.sweepCache === true ? await staleProjectionCacheRecords(ctx, settings) : undefined
   return {
     pendingFile: path,
     sessionIds: readPending(path),
     orphanSubagentIds: orphanSubagentIds(index),
     blankSessionIds: blanks.map((candidate) => candidate.sessionId),
+    staleCacheRecordIds: (stale?.records ?? []).map((record) => record.sessionId),
   }
 }
 
@@ -1207,11 +1401,13 @@ async function retryPendingPurge(ctx, settings, signal) {
   const agents = ctx.get('agents')
   const orphans = await sweepOrphanSubagents(ctx, settings, signal)
   const blanks = await sweepBlankSessions(ctx, settings, signal)
+  const cache = await sweepProjectionCache(ctx, settings, signal)
   return {
     ...report,
     stillLoaded: report.remaining.filter((sessionId) => isLoaded(sessions, agents, sessionId)),
     orphans,
     blanks,
+    cache,
   }
 }
 
@@ -1225,6 +1421,7 @@ async function retryPendingPurge(ctx, settings, signal) {
 async function pendingFilePath(ctx, settings, hintDirectory) {
   if (settings.pendingFile !== undefined) return settings.pendingFile
   const home = await resolveHarnessHome(ctx, settings, hintDirectory)
+  if (home !== undefined) settings.harnessHome = home
   return home === undefined ? undefined : join(home, ...DEFAULT_PENDING_FILE.split('/'))
 }
 
@@ -1242,6 +1439,7 @@ async function pendingFilePath(ctx, settings, hintDirectory) {
  * @returns the absolute Harness home, or undefined when nothing resolves.
  */
 async function resolveHarnessHome(ctx, settings, hintDirectory) {
+  if (settings.harnessHome !== undefined) return settings.harnessHome
   const fromEnvironment = readOptionalPath(process.env.DSH_HOME)
   if (fromEnvironment !== undefined) return fromEnvironment
   if (hintDirectory !== undefined) return harnessHomeOfDirectory(hintDirectory)

@@ -88,6 +88,9 @@ window.__ModuleLoader__.load({
 			'pending.blanks': '{count} unused blank session(s) will also be removed.',
 			'pending.blanksDone': 'Removed {count} unused blank session(s).',
 			'pending.blanksHeld': 'Left {count} blank session(s) in place: still open, already used, or its log is not a placeholder.',
+			'pending.cache': '{count} projection-cache record(s) of deleted sessions will also be removed.',
+			'pending.cacheDone': 'Removed {count} orphaned projection-cache record(s).',
+			'pending.cacheFailed': 'Could not remove {count} orphaned projection-cache record(s).',
 			'pending.blanksFailed': 'Could not remove {count} blank session(s).',
 			'pending.none': 'Nothing is pending: every scheduled deletion has already completed.',
 			'pending.loading': 'Reading the pending list\u2026',
@@ -129,6 +132,9 @@ window.__ModuleLoader__.load({
 			'pending.blanks': '还会清理 {count} 个从未开始的空白会话。',
 			'pending.blanksDone': '已清理 {count} 个从未开始的空白会话。',
 			'pending.blanksHeld': '有 {count} 个空白会话没有动：仍被占用、已有内容，或日志不像占位。',
+			'pending.cache': '还会清掉 {count} 条已删除会话遗留的投影缓存记录。',
+			'pending.cacheDone': '已清掉 {count} 条失效的投影缓存记录。',
+			'pending.cacheFailed': '有 {count} 条失效的投影缓存记录没能清掉。',
 			'pending.blanksFailed': '有 {count} 个空白会话没能删掉。',
 			'pending.none': '当前没有待删除项：已登记的清理都已完成。',
 			'pending.loading': '正在读取待删除列表\u2026',
@@ -328,24 +334,30 @@ window.__ModuleLoader__.load({
 				const staged = state.value?.sessionIds?.length ?? 0
 				const leftovers = state.value?.orphanSubagentIds?.length ?? 0
 				const blanks = state.value?.blankSessionIds?.length ?? 0
+				const cache = state.value?.staleCacheRecordIds?.length ?? 0
 				if (staged > 0) lines.push(t('pending.count', { count: staged }))
 				if (leftovers > 0) lines.push(t('pending.orphans', { count: leftovers }))
 				if (blanks > 0) lines.push(t('pending.blanks', { count: blanks }))
-				if (staged === 0 && leftovers === 0 && blanks === 0) lines.push(t('pending.none'))
+				if (cache > 0) lines.push(t('pending.cache', { count: cache }))
+				if (staged === 0 && leftovers === 0 && blanks === 0 && cache === 0) lines.push(t('pending.none'))
 			}
 			if (state.result !== null) {
 				const orphans = state.result.orphans?.deleted?.length ?? 0
 				const blanks = state.result.blanks?.deleted?.length ?? 0
 				const blanksHeld = state.result.blanks?.skipped?.length ?? 0
 				const blanksFailed = state.result.blanks?.failed?.length ?? 0
+				const cache = state.result.cache?.deleted?.length ?? 0
+				const cacheFailed = state.result.cache?.failed?.length ?? 0
 				if (state.result.deleted > 0) lines.push(t('pending.done', { count: state.result.deleted }))
 				if (orphans > 0) lines.push(t('pending.orphansDone', { count: orphans }))
 				if (blanks > 0) lines.push(t('pending.blanksDone', { count: blanks }))
 				if (blanksHeld > 0) lines.push(t('pending.blanksHeld', { count: blanksHeld }))
 				if (blanksFailed > 0) lines.push(t('pending.blanksFailed', { count: blanksFailed }))
+				if (cache > 0) lines.push(t('pending.cacheDone', { count: cache }))
+				if (cacheFailed > 0) lines.push(t('pending.cacheFailed', { count: cacheFailed }))
 				if (state.result.stillStaged > 0) lines.push(t('pending.still', { count: state.result.stillStaged }))
 				if (state.result.dropped > 0) lines.push(t('pending.drop', { count: state.result.dropped }))
-				if (state.result.deleted === 0 && orphans === 0 && blanks === 0 && blanksHeld === 0 && blanksFailed === 0 && state.result.stillStaged === 0 && state.result.dropped === 0) {
+				if (state.result.deleted === 0 && orphans === 0 && blanks === 0 && blanksHeld === 0 && blanksFailed === 0 && cache === 0 && cacheFailed === 0 && state.result.stillStaged === 0 && state.result.dropped === 0) {
 					lines.push(t('pending.none'))
 				}
 			}
