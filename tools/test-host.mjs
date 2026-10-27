@@ -19,7 +19,7 @@
  */
 import { strict as assert } from 'node:assert'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -108,11 +108,29 @@ const INVALID_JSON = Symbol('invalid-json')
  * @param config - extra plugin config for this activation.
  * @returns the world, for chaining.
  */
-function launch(world, config = {}) {
-  if (world.pendingFile === undefined) {
-    world.pendingFile = join(tmpdir(), `dsh-archive-purge-pending-${String(Date.now())}-${String(Math.trunc(Math.random() * 1e6))}.json`)
+const HARNESS_TEMP = []
+process.once('exit', () => {
+  // A scenario that fails mid-way must not leave its scratch tree behind.
+  for (const path of HARNESS_TEMP) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+    } catch {
+      // Nothing useful to do while the process is exiting.
+    }
   }
-  if (world.root === undefined) world.root = join(tmpdir(), `dsh-archive-purge-root-${String(Math.trunc(Math.random() * 1e9))}`)
+})
+
+function launch(world, config = {}) {
+  if (world.root === undefined) {
+    world.root = join(tmpdir(), `dsh-archive-purge-root-${String(Math.trunc(Math.random() * 1e9))}`)
+    HARNESS_TEMP.push(world.root)
+  }
+  // The deferred-purge store lives inside the scenario's own tree, so removing that
+  // tree (what every scenario does) also removes the store: a file under the OS temp
+  // directory outlived hundreds of runs before this.
+  if (world.pendingFile === undefined) {
+    world.pendingFile = join(world.root, 'archive-purge-pending.json')
+  }
   // The process environment usually carries the developer's real `DSH_HOME`; without
   // this pin a pass that resolves a home (the projection-cache sweep) would run against
   // the machine's own store instead of the scenario's temporary one.
