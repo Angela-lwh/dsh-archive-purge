@@ -674,6 +674,53 @@ function cacheRecordPath(world, sessionId) {
 }
 
 {
+  // A Session with an unsent draft is user text: the page reports it, the Host stores
+  // the report beside its deferred-purge store, and the sweep leaves that Session alone
+  // while still collecting a genuinely abandoned neighbour.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-draft-'))
+  const projectSlug = '--D-Project-demo--'
+  const withDraft = 'session-with-draft'
+  const abandoned = 'session-abandoned'
+  await seedBlank(world, projectSlug, withDraft)
+  await seedBlank(world, projectSlug, abandoned)
+  world.pendingFile = join(world.root, 'pending.json')
+  writeFileSync(world.pendingFile, JSON.stringify({ version: 1, sessionIds: [] }), 'utf8')
+  launch(world, { sweepBlanks: false })
+
+  const reported = await world.request({ action: 'reportDrafts', sessionIds: [withDraft, withDraft, 'session-unknown'] })
+  assert.equal(reported.body.ok, true, JSON.stringify(reported.body))
+  assert.deepEqual(reported.body.value.sessionIds, [withDraft, 'session-unknown'], 'a report is de-duplicated')
+  assert.equal(existsSync(join(world.root, 'draft-holders.json')), true, 'the registry is written beside the pending store')
+
+  const settings = { sweepBlanks: true, blankMinAgeMs: 0, pendingFile: world.pendingFile, harnessHome: world.root }
+  const report = await __test.sweepBlankSessions(ctxFor(world), settings)
+  assert.deepEqual(report.deleted, [abandoned], JSON.stringify(report))
+  assert.equal(existsSync(join(world.root, projectSlug, withDraft)), true, 'the draft holder survives')
+  assert.equal(existsSync(join(world.root, projectSlug, abandoned)), false, 'its neighbour is still collected')
+
+  const preview = await __test.listPendingPurge(ctxFor(world), settings)
+  assert.deepEqual(preview.blankSessionIds, [abandoned], 'the dialog never promises to delete a draft holder')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
+  // A malformed report is refused and changes nothing.
+  const world = scenario()
+  world.root = await mkdtemp(join(tmpdir(), 'dsh-archive-purge-draft-'))
+  world.pendingFile = join(world.root, 'pending.json')
+  writeFileSync(world.pendingFile, JSON.stringify({ version: 1, sessionIds: [] }), 'utf8')
+  launch(world, { sweepBlanks: false })
+  for (const sessionIds of ['nope', [1], ['']]) {
+    const refused = await world.request({ action: 'reportDrafts', sessionIds })
+    assert.equal(refused.body.ok, false, JSON.stringify(sessionIds))
+    assert.equal(refused.body.error.code, 'archive-purge/bad-request')
+  }
+  assert.equal(existsSync(join(world.root, 'draft-holders.json')), false, 'nothing is stored for a malformed report')
+  await rm(world.root, { recursive: true, force: true })
+}
+
+{
   // The cache record goes through the cache's own table when the Host exposes one:
   // memory and disk change together, and the stored file is the fake table's own doing.
   const world = scenario()

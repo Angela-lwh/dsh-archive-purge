@@ -473,6 +473,121 @@ window.__ModuleLoader__.load({
 			})
 		}
 
+		/** localStorage prefix of one Session's composer state. */
+		const DRAFT_KEY_PREFIX = 'dsh.conversation.'
+
+		/**
+		 * Whether one stored composer value carries user text.
+		 *
+		 * The store keeps either a plain string (older shape) or the editor snapshot
+		 * `{text, references, command}`; a draft of only `@` references or a command chip
+		 * is still user work.
+		 * @param draft - the stored `draft` field.
+		 * @returns whether it is non-empty.
+		 */
+		function isDraftPresent(draft) {
+			if (typeof draft === 'string') return draft.trim() !== ''
+			if (draft === null || typeof draft !== 'object') return false
+			if (typeof draft.text === 'string' && draft.text.trim() !== '') return true
+			if (Array.isArray(draft.references) && draft.references.length > 0) return true
+			return typeof draft.command?.token === 'string' && draft.command.token !== ''
+		}
+
+		/**
+		 * Sessions whose composer still holds an unsent draft.
+		 *
+		 * Read straight from the store the conversation view persists into; a key that
+		 * does not parse, or a draft that is empty, is simply not reported.
+		 * @param storage - the page's `localStorage` (injectable for tests).
+		 * @returns the Session ids, sorted.
+		 */
+		function draftSessionIds(storage) {
+			const ids = []
+			if (storage === undefined || typeof storage.length !== 'number' || typeof storage.key !== 'function') return ids
+			for (let index = 0; index < storage.length; index += 1) {
+				const rawKey = storage.key(index)
+				if (typeof rawKey !== 'string' || !rawKey.startsWith(DRAFT_KEY_PREFIX)) continue
+				const sessionId = rawKey.slice(DRAFT_KEY_PREFIX.length)
+				if (sessionId === '') continue
+				let stored
+				try {
+					stored = JSON.parse(storage.getItem(rawKey) ?? 'null')
+				} catch {
+					continue
+				}
+				if (stored === null || typeof stored !== 'object' || !('draft' in stored)) continue
+				if (isDraftPresent(stored.draft)) ids.push(sessionId)
+			}
+			return ids.sort()
+		}
+
+		/**
+		 * Keep the Host's draft registry in step with the page.
+		 *
+		 * The sweep cannot otherwise tell a placeholder the user typed into from one
+		 * they never opened, and a draft lives only here. The report is sent when the set
+		 * changes, on load, on the first activity after the page wakes, and while the
+		 * page is being torn down (`keepalive`), so a draft typed and never sent survives
+		 * both a Host restart and the next sweep.
+		 *
+		 * @param post - the Host call, `(body, options) => Promise<unknown>`.
+		 * @param host - the page environment (`localStorage`, `document`, `window`).
+		 * @returns a disposer, when listeners were installed.
+		 */
+		function installDraftReporter(post, host = globalThis) {
+			const document_ = host.document
+			const window_ = host.window ?? host
+			const storage = host.localStorage ?? host.window?.localStorage
+			if (document_ === undefined || typeof document_.addEventListener !== 'function') return undefined
+			let lastReported = null
+			const report = () => {
+				let ids
+				try {
+					ids = draftSessionIds(storage)
+				} catch {
+					return
+				}
+				const serialized = ids.join(' ')
+				if (serialized === lastReported) return
+				lastReported = serialized
+				try {
+					Promise.resolve(post({ action: 'reportDrafts', sessionIds: ids })).catch(() => {
+						// The next activity re-reports; a refusal leaves the last registry in place.
+						lastReported = null
+					})
+				} catch {
+					lastReported = null
+				}
+			}
+			const events = ['pointerdown', 'keydown', 'focus']
+			for (const name of events) window_.addEventListener?.(name, report, true)
+			const onVisible = () => {
+				if (document_.visibilityState === 'visible') report()
+			}
+			document_.addEventListener('visibilitychange', onVisible, true)
+			// The last chance to record a draft typed and never sent.
+			const onHide = () => {
+				let ids
+				try {
+					ids = draftSessionIds(storage)
+				} catch {
+					return
+				}
+				try {
+					post({ action: 'reportDrafts', sessionIds: ids }, { keepalive: true })
+				} catch {
+					// A closing page has no second chance.
+				}
+			}
+			window_.addEventListener?.('pagehide', onHide, true)
+			report()
+			return () => {
+				for (const name of events) window_.removeEventListener?.(name, report, true)
+				document_.removeEventListener?.('visibilitychange', onVisible, true)
+				window_.removeEventListener?.('pagehide', onHide, true)
+			}
+		}
+
 		/** Cordis services the browser half consumes. */
 		const inject = ['slots', 'workspaces', 'locale']
 
@@ -581,12 +696,13 @@ window.__ModuleLoader__.load({
 			 * @param body - the request body, including its `action`.
 			 * @returns the response's `value` field.
 			 */
-			const postRoute = async (body) => {
+			const postRoute = async (body, options = {}) => {
 				const response = await fetch(new URL(ROUTE_PATH.slice(1), document.baseURI), {
 					method: 'POST',
 					headers: { 'content-type': 'application/json' },
 					body: JSON.stringify(body),
 					credentials: 'same-origin',
+					...(options.keepalive === true ? { keepalive: true } : {}),
 				})
 				const text = await response.text()
 				let payload
@@ -634,6 +750,9 @@ window.__ModuleLoader__.load({
 			const retryPending = async () => (await postRoute({ action: ACTION_RETRY_PENDING })).value
 
 			ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'archive-purge: dictionaries')
+
+			// Installed after `postRoute` exists: the first report runs immediately.
+			installDraftReporter((body, options) => postRoute(body, options))
 
 			/**
 			 * One retry dialog at a time, on its own store: the cleanup is not tied to a
@@ -711,6 +830,9 @@ window.__ModuleLoader__.load({
 		exports.describeFailure = describeFailure
 		exports.shouldReconnectAfterIdle = shouldReconnectAfterIdle
 		exports.installIdleReconnect = installIdleReconnect
+		exports.draftSessionIds = draftSessionIds
+		exports.isDraftPresent = isDraftPresent
+		exports.installDraftReporter = installDraftReporter
 		return module.exports
 	},
 })

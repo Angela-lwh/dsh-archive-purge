@@ -59,7 +59,7 @@ export const name = 'archive-purge'
  * empty store and the deferred purge looks idle, and a misread lineage either
  * strands a subagent log or deletes a fork).
  */
-export const __test = { pendingFilePath, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents, sweepProjectionCache, staleProjectionCacheRecords, dropProjectionCacheRecord, dropSpillDirectory, spillSessionDirectory, blankCandidates, sweepBlankSessions, runHygienePass }
+export const __test = { pendingFilePath, draftHoldersPath, readDraftHolders, reportDraftHolders, readReportedDraftIds, resolveHarnessHome, locateAnyStoredArtifact, sessionsRootOf, harnessHomeOf, harnessHomeOfDirectory, resolveSessionsRoot, readPending, drainStagedPurges, listPendingPurge, retryPendingPurge, releaseLoadedSession, collectSessionIndex, subagentDescendantIds, orphanSubagentIds, sweepOrphanSubagents, sweepProjectionCache, staleProjectionCacheRecords, dropProjectionCacheRecord, dropSpillDirectory, spillSessionDirectory, blankCandidates, sweepBlankSessions, runHygienePass }
 /**
  * Hard service requirements. An array (not the older `{required, optional}`
  * object shape, which the vendored Cordis reads as services literally named
@@ -87,6 +87,20 @@ const ROUTE_PATH = '/api/archive-purge/deleteSession'
 const ACTION_DELETE = 'delete'
 const ACTION_LIST_PENDING = 'listPending'
 const ACTION_RETRY_PENDING = 'retryPending'
+/**
+ * The browser reports which Sessions hold an unsent composer draft.
+ *
+ * A draft lives only in the page (`localStorage['dsh.conversation.<id>']`), so the
+ * Host cannot see it: a blank placeholder that the user typed into and then left is
+ * indistinguishable from one they never opened. The report closes that gap — it is
+ * persisted next to the deferred-purge store, so a Host start (before any page is
+ * connected) still knows which placeholders carry user text.
+ */
+const ACTION_REPORT_DRAFTS = 'reportDrafts'
+/** File beside the deferred-purge store that carries the reported draft holders. */
+const DRAFT_HOLDERS_FILE = 'draft-holders.json'
+/** Upper bound on one report; the page's own draft count is far below it. */
+const DRAFT_HOLDERS_LIMIT = 2000
 /** One log generation, or a migration staging file, inside a session directory. */
 const SESSION_DIR_CONTENT = /^(?:session(?:\.[A-Za-z0-9]+)*\.jsonl(?:\.zstd)?|session\.migration\..*\.tmp)$/
 /** Project directory keys are `--<slug>--`; the no-project fallback is `_no-cwd`. */
@@ -238,6 +252,13 @@ async function handleDeleteRequest(ctx, settings, request) {
   if (action === ACTION_RETRY_PENDING) {
     try {
       return jsonResponse(200, { ok: true, value: await retryPendingPurge(ctx, settings, request.signal) })
+    } catch (error) {
+      return jsonResponse(200, failure(error?.code ?? 'archive-purge/failed', messageOf(error)))
+    }
+  }
+  if (action === ACTION_REPORT_DRAFTS) {
+    try {
+      return jsonResponse(200, { ok: true, value: await reportDraftHolders(ctx, settings, body) })
     } catch (error) {
       return jsonResponse(200, failure(error?.code ?? 'archive-purge/failed', messageOf(error)))
     }
@@ -1116,6 +1137,8 @@ function blankCandidates(index, projections, sessions, agents, registry, options
     // A Session the Host holds may be open in a window, so it is never a candidate.
     if (isLoaded(sessions, agents, sessionId)) continue
     if (isPinned(registry, sessionId)) continue
+    // A Session with an unsent draft is user text, not a placeholder: never a candidate.
+    if (options.draftHolders?.has?.(sessionId) === true) continue
     const createdAt = typeof header.createdAt === 'number' ? header.createdAt : undefined
     if (options.minAgeMs > 0 && (createdAt === undefined || options.now - createdAt < options.minAgeMs)) continue
     const cached = cachedBlank(projections, header)
@@ -1168,6 +1191,7 @@ async function sweepBlankSessions(ctx, settings, signal) {
   const candidates = blankCandidates(index, ctx.get('sessionProjectionCache'), ctx.get('sessions'), ctx.get('agents'), ctx.workspaceRegistry, {
     minAgeMs: settings.blankMinAgeMs,
     now: Date.now(),
+    draftHolders: await readDraftHolders(ctx, settings),
   })
   report.examined = candidates.length
   for (const { sessionId, header, cached } of candidates) {
@@ -1454,6 +1478,8 @@ async function listPendingPurge(ctx, settings) {
       // The dialog promises only what a checkpoint already vouches for; the pass itself
       // also takes uncheckpointed small logs, and reports those when it runs.
       confirmedOnly: true,
+      // A Session with an unsent draft is never promised for deletion either.
+      draftHolders: await readDraftHolders(ctx, settings),
     })
     : []
   const stale = settings.sweepCache === true ? await staleProjectionCacheRecords(ctx, settings) : undefined
@@ -1509,6 +1535,89 @@ async function pendingFilePath(ctx, settings, hintDirectory) {
   const home = await resolveHarnessHome(ctx, settings, hintDirectory)
   if (home !== undefined) settings.harnessHome = home
   return home === undefined ? undefined : join(home, ...DEFAULT_PENDING_FILE.split('/'))
+}
+
+/**
+ * Absolute path of the draft-holder registry, beside the deferred-purge store.
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @returns the path, or undefined when no Harness home resolves.
+ */
+async function draftHoldersPath(ctx, settings) {
+  const pending = await pendingFilePath(ctx, settings, undefined)
+  return pending === undefined ? undefined : join(dirname(pending), DRAFT_HOLDERS_FILE)
+}
+
+/**
+ * Validate one `reportDrafts` body into a de-duplicated id list.
+ * @param body - the request body.
+ * @returns the ids, or undefined when the payload is malformed.
+ */
+function readReportedDraftIds(body) {
+  const raw = body?.sessionIds
+  if (!Array.isArray(raw)) return undefined
+  const ids = []
+  const seen = new Set()
+  for (const value of raw) {
+    if (typeof value !== 'string' || value === '' || value.length > 200) return undefined
+    if (seen.has(value)) continue
+    seen.add(value)
+    ids.push(value)
+    if (ids.length > DRAFT_HOLDERS_LIMIT) return undefined
+  }
+  return ids
+}
+
+/**
+ * Persist the set of Sessions that currently hold an unsent draft.
+ *
+ * The page owns the drafts; this registry is the only way the Host can know which
+ * placeholders are user text. It is rewritten atomically, and read fresh by every
+ * hygiene pass, so a draft reported once stays protected until the page reports again
+ * without it (a send clears the draft, and the page re-reports on its next activity).
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @param body - `{ sessionIds: string[] }`.
+ * @returns the stored path and ids.
+ */
+async function reportDraftHolders(ctx, settings, body) {
+  const sessionIds = readReportedDraftIds(body)
+  if (sessionIds === undefined) {
+    throw new PurgeError('archive-purge/bad-request', `sessionIds must be an array of at most ${String(DRAFT_HOLDERS_LIMIT)} non-empty strings`)
+  }
+  const path = await draftHoldersPath(ctx, settings)
+  if (path === undefined) {
+    throw new PurgeError('archive-purge/no-pending-store', 'no Harness home could be resolved, so the draft registry cannot be stored')
+  }
+  mkdirSync(dirname(path), { recursive: true })
+  const temporary = `${path}.tmp`
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, sessionIds }, null, 2)}
+`, 'utf8')
+  renameSync(temporary, path)
+  return { path, sessionIds }
+}
+
+/**
+ * Sessions the page reported as holding an unsent draft.
+ *
+ * Read fresh on every pass: an unreadable or missing registry means no protection is
+ * known, which is exactly the old behaviour, never a reason to fail a pass.
+ *
+ * @param ctx - Host context.
+ * @param settings - resolved plugin config.
+ * @returns the reported ids.
+ */
+async function readDraftHolders(ctx, settings) {
+  const path = await draftHoldersPath(ctx, settings)
+  if (path === undefined) return new Set()
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    const raw = Array.isArray(parsed?.sessionIds) ? parsed.sessionIds : []
+    return new Set(raw.filter((value) => typeof value === 'string' && value !== ''))
+  } catch {
+    return new Set()
+  }
 }
 
 /**

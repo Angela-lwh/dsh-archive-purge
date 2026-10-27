@@ -430,4 +430,70 @@ dispose()
 assert.equal(listeners.has('win:pointerdown'), false, 'disposing unbinds the activity listeners')
 assert.equal(listeners.has('doc:visibilitychange'), false, 'disposing unbinds the visibility listener')
 
+// ---- drafts the user typed but never sent ---------------------------------------
+
+function storageOf(entries) {
+  const keys = () => Object.keys(entries)
+  return {
+    get length() { return keys().length },
+    key: (index) => keys()[index] ?? null,
+    getItem: (key) => (key in entries ? entries[key] : null),
+  }
+}
+
+const entries = {
+  'dsh.conversation.session-a': JSON.stringify({ draft: 'half a thought' }),
+  'dsh.conversation.session-b': JSON.stringify({ draft: { text: '   ', references: [{ id: 'ref-1' }] } }),
+  'dsh.conversation.session-c': JSON.stringify({ draft: { text: '' } }),
+  'dsh.conversation.session-d': JSON.stringify({ draft: '' }),
+  'dsh.conversation.session-e': 'not json',
+  'dsh.conversation.session-f': JSON.stringify({ view: 'compact' }),
+  'dsh.other.session-g': JSON.stringify({ draft: 'ignored key' }),
+  'dsh.conversation.': JSON.stringify({ draft: 'no session id' }),
+}
+const drafts = storageOf(entries)
+assert.deepEqual(exported.draftSessionIds(drafts), ['session-a', 'session-b'],
+  'only a non-empty draft of a real Session is reported')
+assert.deepEqual(exported.draftSessionIds(undefined), [], 'a page without storage reports nothing')
+assert.equal(exported.isDraftPresent(' x '), true)
+assert.equal(exported.isDraftPresent('   '), false)
+assert.equal(exported.isDraftPresent({ text: 'x' }), true)
+assert.equal(exported.isDraftPresent({ text: '', command: { token: 't' } }), true)
+assert.equal(exported.isDraftPresent({ text: '', references: [] }), false)
+
+const reports = []
+const reporterListeners = new Map()
+const reporterDocument = {
+  visibilityState: 'visible',
+  addEventListener: (name, fn) => reporterListeners.set(`doc:${name}`, fn),
+  removeEventListener: (name) => reporterListeners.delete(`doc:${name}`),
+}
+const reporterWindow = {
+  addEventListener: (name, fn) => reporterListeners.set(`win:${name}`, fn),
+  removeEventListener: (name) => reporterListeners.delete(`win:${name}`),
+}
+const disposeReporter = exported.installDraftReporter(
+  (body, options) => {
+    reports.push({ body, options })
+    return Promise.resolve()
+  },
+  { document: reporterDocument, window: reporterWindow, localStorage: drafts },
+)
+assert.equal(reports.length, 1, 'the first report runs at install')
+assert.deepEqual(reports[0].body, { action: 'reportDrafts', sessionIds: ['session-a', 'session-b'] })
+reporterListeners.get('win:pointerdown')()
+assert.equal(reports.length, 1, 'an unchanged set is not re-sent')
+
+entries['dsh.conversation.session-a'] = JSON.stringify({ draft: '' })
+reporterListeners.get('win:keydown')()
+assert.equal(reports.length, 2, 'a changed set is re-sent on the next activity')
+assert.deepEqual(reports[1].body, { action: 'reportDrafts', sessionIds: ['session-b'] })
+
+reporterListeners.get('win:pagehide')()
+assert.equal(reports.length, 3, 'the closing page reports regardless of change')
+assert.equal(reports[2].options?.keepalive, true, 'the closing report must survive the teardown')
+
+disposeReporter()
+assert.equal(reporterListeners.has('win:pointerdown'), false, 'disposing unbinds the reporter listeners')
+
 console.log('client bundle: all assertions passed')
