@@ -845,7 +845,7 @@ function cacheRecordPath(world, sessionId) {
 // ---- blank placeholders: the sessions the sidebar hides but @ lists ------------
 
 /** One stored Session directory plus the metadata a blank placeholder carries. */
-async function seedBlank(world, projectSlug, sessionId, { createdAt = Date.now() - 60 * 60 * 1000, events = [{ type: 'sandbox/mode' }, { type: 'permissions' }], sizeBytes = 512 } = {}) {
+async function seedBlank(world, projectSlug, sessionId, { createdAt = Date.now() - 48 * 60 * 60 * 1000, events = [{ type: 'sandbox/mode' }, { type: 'permissions' }], sizeBytes = 512 } = {}) {
   world.headers[sessionId] = { id: sessionId, cwd: 'D:\\Project\\demo', createdAt }
   world.projections[sessionId] = { sessionListMetadata: { blank: true } }
   world.sessionEvents[sessionId] = events
@@ -1082,9 +1082,9 @@ async function seedBlank(world, projectSlug, sessionId, { createdAt = Date.now()
     setTimeout(resolve, 200)
   })
   assert.equal(existsSync(join(world.root, projectSlug, sessionId)), true, 'too new for the startup pass')
-  // A minute later the same placeholder is behind the grace period; a new conversation
+  // Long after the grace period the same placeholder is collectable; a new conversation
   // is born, and that lifecycle edge is what collects it.
-  world.headers[sessionId].createdAt = Date.now() - 60 * 60 * 1000
+  world.headers[sessionId].createdAt = Date.now() - 48 * 60 * 60 * 1000
   created.listener({ id: sessionId })
   await waitFor(() => !existsSync(join(world.root, projectSlug, sessionId)))
   assert.equal(existsSync(join(world.root, projectSlug, sessionId)), false, 'the event triggers the sweep')

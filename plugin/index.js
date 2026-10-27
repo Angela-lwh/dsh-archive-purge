@@ -153,11 +153,20 @@ const PENDING_VERSION = 1
  */
 const BLANK_PROJECTION = 'sessionListMetadata'
 /**
- * How long a blank Session must have existed before it is collectable. A freshly
- * created one may still be the conversation the user is opening, so the sweep
- * only takes what has demonstrably been abandoned.
+ * How long a blank Session must have existed before it is collectable.
+ *
+ * A day, deliberately: a placeholder may be the conversation the user is coming back
+ * to, and the log cannot tell it apart from one they never opened — an unsent draft
+ * lives only in the page. The draft registry covers the text they typed; the age
+ * covers the rest of the intent, and this sweep is hygiene, not housekeeping.
  */
-const DEFAULT_BLANK_MIN_AGE_MS = 10 * 60 * 1000
+const DEFAULT_BLANK_MIN_AGE_MS = 24 * 60 * 60 * 1000
+/**
+ * How long an orphaned projection-cache record must have been quiet before it is
+ * collected. Ten minutes: a Session created a moment ago may not have written its log
+ * yet, which is the only race this gate exists for.
+ */
+const DEFAULT_CACHE_MIN_AGE_MS = 10 * 60 * 1000
 /**
  * How large a log may be before it is assumed to hold a conversation. It is only a
  * cost gate for Sessions no checkpoint can answer for: a placeholder written at
@@ -199,7 +208,7 @@ export function apply(ctx, config = {}) {
     sweepBlanks: config?.sweepBlanks !== false,
     blankMinAgeMs: readNonNegativeMs(config?.blankMinAgeMs, DEFAULT_BLANK_MIN_AGE_MS),
     sweepCache: config?.sweepCache !== false,
-    cacheMinAgeMs: readNonNegativeMs(config?.cacheMinAgeMs, DEFAULT_BLANK_MIN_AGE_MS),
+    cacheMinAgeMs: readNonNegativeMs(config?.cacheMinAgeMs, DEFAULT_CACHE_MIN_AGE_MS),
     filterBlankReferences: config?.filterBlankReferences !== false,
   }
   ctx.connection.fetch.register({
